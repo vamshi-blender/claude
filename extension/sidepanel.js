@@ -3,13 +3,18 @@ const promptEl = document.getElementById("prompt");
 const sendEl = document.getElementById("send");
 const statusEl = document.getElementById("status");
 const optionsEl = document.getElementById("open-options");
+const clearEl = document.getElementById("clear-chat");
+const lastToolEl = document.getElementById("last-tool");
 
-const tabId = Number(new URLSearchParams(window.location.search).get("tabId"));
-const historyKey = Number.isFinite(tabId) ? `history_tab_${tabId}` : "history_tab_default";
+const tabParam = new URLSearchParams(window.location.search).get("tabId");
+const parsedTabId = tabParam ? Number(tabParam) : null;
+const tabId = Number.isFinite(parsedTabId) ? parsedTabId : null;
+const historyKey = tabId ? `history_tab_${tabId}` : "history_tab_default";
 
 let history = [];
 
 optionsEl.addEventListener("click", () => chrome.runtime.openOptionsPage());
+clearEl.addEventListener("click", () => clearChat());
 sendEl.addEventListener("click", () => handleSend());
 promptEl.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
@@ -19,6 +24,7 @@ promptEl.addEventListener("keydown", (event) => {
 });
 
 loadHistory().then(renderHistory).catch(() => {});
+setInterval(updateLastTool, 1000);
 
 async function handleSend() {
   const text = promptEl.value.trim();
@@ -33,7 +39,7 @@ async function handleSend() {
     const response = await chrome.runtime.sendMessage({
       type: "CHAT_REQUEST",
       history,
-      tabId: Number.isFinite(tabId) ? tabId : null
+      tabId
     });
 
     if (!response?.ok) {
@@ -75,6 +81,20 @@ function setStatus(text) {
   statusEl.textContent = text;
 }
 
+async function updateLastTool() {
+  try {
+    const response = await chrome.runtime.sendMessage({ type: "GET_LAST_TOOL" });
+    if (!response?.ok) {
+      return;
+    }
+    lastToolEl.textContent = response.tool
+      ? JSON.stringify(response.tool, null, 2)
+      : "None";
+  } catch {
+    // ignore polling errors
+  }
+}
+
 async function loadHistory() {
   const stored = await chrome.storage.local.get(historyKey);
   const value = stored[historyKey];
@@ -85,4 +105,11 @@ async function loadHistory() {
 
 async function saveHistory() {
   await chrome.storage.local.set({ [historyKey]: history });
+}
+
+async function clearChat() {
+  history = [];
+  await chrome.storage.local.remove(historyKey);
+  messagesEl.innerHTML = "";
+  setStatus("");
 }

@@ -23,6 +23,12 @@ body {
   margin: 0;
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .link-button {
   background: none;
   border: none;
@@ -136,4 +142,23 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+.tool-debug {
+  border-top: 1px solid #e2e0da;
+  background: #faf9f6;
+  padding: 8px 16px;
+  font-size: 12px;
+  color: #4a4a46;
+}
+
+.tool-debug-header {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.tool-debug-body {
+  margin: 0;
+  white-space: pre-wrap;
+  font-family: "Segoe UI", Tahoma, Arial, sans-serif;
 }

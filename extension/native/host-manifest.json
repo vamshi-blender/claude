@@ -1,0 +1,9 @@
+{
+  \"name\": \"com.vamshi.prompt_navigator\",
+  \"description\": \"Prompt Navigator MCP Host\",
+  \"path\": \"C:\\Users\\vamshisaikrishnaa\\Desktop\\claude_extt\\extension\\native\\host.cmd\",
+  \"type\": \"stdio\",
+  \"allowed_origins\": [
+    \"chrome-extension://jhemmpgeabcjlppeealpbdbndepmfjbo/\"
+  ]
+}

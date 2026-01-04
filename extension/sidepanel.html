@@ -9,11 +9,18 @@
   <body>
     <header class="header">
       <h1>Prompt Navigator</h1>
-      <button id="open-options" class="link-button">Settings</button>
+      <div class="header-actions">
+        <button id="clear-chat" class="link-button">Clear</button>
+        <button id="open-options" class="link-button">Settings</button>
+      </div>
     </header>
     <main class="chat">
       <div id="messages" class="messages"></div>
     </main>
+    <section class="tool-debug">
+      <div class="tool-debug-header">Last tool</div>
+      <pre id="last-tool" class="tool-debug-body">None</pre>
+    </section>
     <footer class="composer">
       <textarea id="prompt" rows="3" placeholder="Enter a prompt..."></textarea>
       <div class="composer-actions">

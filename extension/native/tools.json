@@ -1,0 +1,193 @@
+[
+  {
+    "name": "navigate",
+    "description": "Navigate to a URL, or go forward/back in browser history. If you don't have a valid tab ID, use tabs_context first to get available tabs.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "The URL to navigate to. Can be provided with or without protocol (defaults to https://). Use \"forward\" to go forward in history or \"back\" to go back in history."
+        },
+        "tabId": {
+          "type": "number",
+          "description": "Tab ID to navigate. Must be a tab in the current group. Use tabs_context first if you don't have a valid tab ID."
+        }
+      },
+      "required": ["url"]
+    }
+  },
+  {
+    "name": "computer",
+    "description": "Use a mouse and keyboard to interact with a web browser, and take screenshots. If you don't have a valid tab ID, use tabs_context first to get available tabs.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": ["left_click","right_click","type","screenshot","wait","scroll","key","left_click_drag","double_click","triple_click","zoom","scroll_to","hover"]
+        },
+        "coordinate": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number" } },
+        "text": { "type": "string" },
+        "duration": { "type": "number" },
+        "scroll_direction": { "type": "string", "enum": ["up","down","left","right"] },
+        "scroll_amount": { "type": "number" },
+        "start_coordinate": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number" } },
+        "region": { "type": "array", "minItems": 4, "maxItems": 4, "items": { "type": "number" } },
+        "repeat": { "type": "number" },
+        "ref": { "type": "string" },
+        "modifiers": { "type": "string" },
+        "tabId": { "type": "number" }
+      },
+      "required": ["action"]
+    }
+  },
+  {
+    "name": "read_page",
+    "description": "Get an accessibility tree representation of elements on the page.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "filter": { "type": "string", "enum": ["interactive","all"] },
+        "tabId": { "type": "number" },
+        "depth": { "type": "number" },
+        "ref_id": { "type": "string" }
+      }
+    }
+  },
+  {
+    "name": "form_input",
+    "description": "Set values in form elements using element reference ID from the read_page or find tools.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "ref": { "type": "string" },
+        "value": { "type": ["string","boolean","number"] },
+        "tabId": { "type": "number" }
+      },
+      "required": ["ref","value"]
+    }
+  },
+  {
+    "name": "get_page_text",
+    "description": "Extract raw text content from the page, prioritizing article content.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "tabId": { "type": "number" }
+      }
+    }
+  },
+  {
+    "name": "find",
+    "description": "Find elements on the page using natural language.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": { "type": "string" },
+        "tabId": { "type": "number" }
+      },
+      "required": ["query"]
+    }
+  },
+  {
+    "name": "tabs_context",
+    "description": "Get context information about all tabs in the current tab group.",
+    "inputSchema": { "type": "object", "properties": {} }
+  },
+  {
+    "name": "tabs_create",
+    "description": "Creates a new empty tab in the current tab group.",
+    "inputSchema": { "type": "object", "properties": {} }
+  },
+  {
+    "name": "upload_image",
+    "description": "Upload a previously captured screenshot or user-uploaded image to a file input or drag & drop target.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "imageId": { "type": "string" },
+        "ref": { "type": "string" },
+        "coordinate": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number" } },
+        "tabId": { "type": "number" },
+        "filename": { "type": "string" }
+      },
+      "required": ["imageId"]
+    }
+  },
+  {
+    "name": "read_console_messages",
+    "description": "Read browser console messages (console.log, console.error, console.warn, etc.) from a specific tab.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "tabId": { "type": "number" },
+        "onlyErrors": { "type": "boolean" },
+        "clear": { "type": "boolean" },
+        "pattern": { "type": "string" },
+        "limit": { "type": "number" }
+      },
+      "required": ["tabId","pattern"]
+    }
+  },
+  {
+    "name": "read_network_requests",
+    "description": "Read HTTP network requests (XHR, Fetch, documents, images, etc.) from a specific tab.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "tabId": { "type": "number" },
+        "urlPattern": { "type": "string" },
+        "clear": { "type": "boolean" },
+        "limit": { "type": "number" }
+      },
+      "required": ["tabId"]
+    }
+  },
+  {
+    "name": "resize_window",
+    "description": "Resize the current browser window to specified dimensions.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "width": { "type": "number" },
+        "height": { "type": "number" },
+        "tabId": { "type": "number" }
+      },
+      "required": ["width","height"]
+    }
+  },
+  {
+    "name": "turn_answer_start",
+    "description": "Call this immediately before your text response to the user for this turn.",
+    "inputSchema": { "type": "object", "properties": {} }
+  },
+  {
+    "name": "javascript_tool",
+    "description": "Execute JavaScript code in the context of the current page.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "action": { "type": "string" },
+        "text": { "type": "string" },
+        "tabId": { "type": "number" }
+      },
+      "required": ["action","text"]
+    }
+  },
+  {
+    "name": "tabs_context_mcp",
+    "description": "Get context information about the current MCP tab group.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "createIfEmpty": { "type": "boolean" }
+      }
+    }
+  },
+  {
+    "name": "tabs_create_mcp",
+    "description": "Creates a new empty tab in the MCP tab group.",
+    "inputSchema": { "type": "object", "properties": {} }
+  }
+]

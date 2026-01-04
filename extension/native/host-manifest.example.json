@@ -1,0 +1,9 @@
+{
+  "name": "com.vamshi.prompt_navigator",
+  "description": "Prompt Navigator MCP Host",
+  "path": "C:\\\\path\\\\to\\\\extension\\\\native\\\\host.js",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://YOUR_EXTENSION_ID/"
+  ]
+}
