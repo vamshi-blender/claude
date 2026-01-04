@@ -1,5 +1,6 @@
 const OPENAI_BASE_URL = "https://api.openai.com/v1";
 const NATIVE_HOST = "com.vamshi.prompt_navigator";
+const MAX_TOOL_LOOPS = 50;
 
 const consoleBuffer = new Map();
 const networkBuffer = new Map();
@@ -9,6 +10,7 @@ let nativePort = null;
 let nativeRequestId = 0;
 const pendingMcpRequests = new Map();
 let lastToolCall = null;
+const activeChatRequests = new Map();
 
 chrome.runtime.onInstalled.addListener(async () => {
   try {
@@ -22,6 +24,7 @@ chrome.action.onClicked.addListener(async (tab) => {
   if (!tab || typeof tab.id !== "number") {
     return;
   }
+  await ensureMcpGroup(tab);
   await chrome.sidePanel.setOptions({
     tabId: tab.id,
     path: `sidepanel.html?tabId=${encodeURIComponent(tab.id)}`,
@@ -39,6 +42,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message?.type === "GET_LAST_TOOL") {
     sendResponse({ ok: true, tool: lastToolCall });
+    return true;
+  }
+  if (message?.type === "CANCEL_REQUEST") {
+    const entry = activeChatRequests.get(message.requestId);
+    if (entry) {
+      entry.controller.abort();
+    }
+    sendResponse({ ok: true });
     return true;
   }
 });
@@ -158,7 +169,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 });
 
 async function handleChatRequest(message) {
-  const { history, tabId } = message;
+  const { history, tabId, requestId } = message;
   if (!Array.isArray(history) || history.length === 0) {
     throw new Error("Missing chat history.");
   }
@@ -170,6 +181,11 @@ async function handleChatRequest(message) {
 
   if (!openaiApiKey) {
     throw new Error("OpenAI API key not set. Open Options to add it.");
+  }
+
+  const controller = new AbortController();
+  if (requestId) {
+    activeChatRequests.set(requestId, { controller });
   }
 
   let tools = buildTools();
@@ -200,9 +216,13 @@ async function handleChatRequest(message) {
   let messages = [systemMessage, ...history];
   let loops = 0;
 
-  while (loops < 6) {
+  try {
+    while (loops < MAX_TOOL_LOOPS) {
+    if (controller.signal.aborted) {
+      return { assistantMessage: "Paused by user.", paused: true };
+    }
     loops += 1;
-    const response = await callOpenAI(openaiApiKey, model, messages, tools);
+    const response = await callOpenAI(openaiApiKey, model, messages, tools, controller.signal);
     const assistant = response?.choices?.[0]?.message;
     if (!assistant) {
       return { assistantMessage: "No response from model." };
@@ -216,12 +236,18 @@ async function handleChatRequest(message) {
     }
 
     for (const toolCall of toolCalls) {
+      if (controller.signal.aborted) {
+        return { assistantMessage: "Paused by user.", paused: true };
+      }
       setLastTool({
         name: toolCall.function?.name || "unknown",
         args: safeParseJson(toolCall.function?.arguments || "{}") || {}
       });
       let result;
       try {
+        if (controller.signal.aborted) {
+          return { assistantMessage: "Paused by user.", paused: true };
+        }
         result = await mcpRequest("tools/call", {
           name: toolCall.function?.name,
           arguments: safeParseJson(toolCall.function?.arguments || "{}") || {},
@@ -243,7 +269,15 @@ async function handleChatRequest(message) {
     }
   }
 
-  return { assistantMessage: "Stopped after too many tool calls." };
+    return {
+      assistantMessage: `Paused after ${MAX_TOOL_LOOPS} tool calls. Click Continue to proceed.`,
+      paused: true
+    };
+  } finally {
+    if (requestId) {
+      activeChatRequests.delete(requestId);
+    }
+  }
 }
 
 function buildTools() {
@@ -650,13 +684,12 @@ async function toolTabsCreate() {
 async function toolTabsContextMcp(args) {
   if (mcpGroupId === null) {
     if (args?.createIfEmpty) {
-      const windowInfo = await chrome.windows.create({ url: "about:blank" });
-      const tabId = windowInfo?.tabs?.[0]?.id;
-      if (!tabId) {
-        return { ok: false, error: "Failed to create MCP window." };
+      const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!activeTab || typeof activeTab.id !== "number") {
+        return { ok: false, error: "No active tab for MCP group." };
       }
-      mcpGroupId = await chrome.tabs.group({ tabIds: tabId });
-      return { ok: true, groupId: mcpGroupId, tabs: [tabId] };
+      mcpGroupId = await chrome.tabs.group({ tabIds: activeTab.id });
+      return { ok: true, groupId: mcpGroupId, tabs: [activeTab.id] };
     }
     return { ok: true, groupId: null, tabs: [] };
   }
@@ -679,6 +712,17 @@ async function toolTabsCreateMcp() {
     await chrome.tabs.group({ tabIds: newTab.id, groupId: mcpGroupId });
   }
   return { ok: true, tabId: newTab.id };
+}
+
+async function ensureMcpGroup(tab) {
+  if (mcpGroupId !== null) {
+    return mcpGroupId;
+  }
+  const groupId = tab.groupId && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE
+    ? tab.groupId
+    : await chrome.tabs.group({ tabIds: tab.id });
+  mcpGroupId = groupId;
+  return groupId;
 }
 
 async function toolUploadImage(args, fallbackTabId) {
@@ -947,13 +991,14 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
-async function callOpenAI(apiKey, model, messages, tools) {
+async function callOpenAI(apiKey, model, messages, tools, signal) {
   const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`
     },
+    signal,
     body: JSON.stringify({
       model,
       messages,
