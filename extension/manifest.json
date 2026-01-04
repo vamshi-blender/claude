@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "Prompt Navigator",
+  "version": "0.1.0",
+  "description": "Prompt-driven navigation via side panel.",
+  "action": {
+    "default_title": "Open Prompt Navigator"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "options_page": "options.html",
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "permissions": [
+    "sidePanel",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://api.openai.com/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' https://api.openai.com"
+  }
+}
