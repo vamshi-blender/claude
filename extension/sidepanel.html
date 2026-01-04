@@ -8,18 +8,51 @@
   </head>
   <body>
     <header class="header">
-      <h1>Prompt Navigator</h1>
+      <div class="header-left">
+        <h1>Prompt Navigator</h1>
+        <div class="tabs">
+          <button id="tab-chat" class="tab-button active">Chat</button>
+          <button id="tab-recorder" class="tab-button">Recorder</button>
+        </div>
+      </div>
       <div class="header-actions">
         <button id="clear-chat" class="link-button">Clear</button>
         <button id="open-options" class="link-button">Settings</button>
       </div>
     </header>
-    <main class="chat">
+    <main id="chat-view" class="chat">
       <div id="messages" class="messages"></div>
     </main>
-    <section class="tool-debug">
+    <section id="tool-debug" class="tool-debug">
       <div class="tool-debug-header">Last tool</div>
       <pre id="last-tool" class="tool-debug-body">None</pre>
+    </section>
+    <section id="recorder-view" class="recorder hidden">
+      <div id="recorder-login" class="recorder-card hidden">
+        <h2>Recorder Login</h2>
+        <label class="field">
+          <span>Email</span>
+          <input id="recorder-email" type="email" placeholder="you@example.com" />
+        </label>
+        <label class="field">
+          <span>Password</span>
+          <input id="recorder-password" type="password" placeholder="••••••••" />
+        </label>
+        <button id="recorder-login-btn" class="primary">Sign in</button>
+      </div>
+      <div id="recorder-panel" class="recorder-card hidden">
+        <div class="recorder-actions">
+          <button id="record-start" class="primary">Start Recording</button>
+          <button id="record-stop" class="secondary">Stop</button>
+          <button id="record-play" class="secondary">Play</button>
+          <button id="record-clear" class="secondary">Clear</button>
+        </div>
+        <div class="recorder-status" id="recorder-status">Idle</div>
+        <div class="recorder-steps">
+          <div class="recorder-steps-header">Recorded Steps</div>
+          <ol id="recorder-steps-list"></ol>
+        </div>
+      </div>
     </section>
     <footer class="composer">
       <textarea id="prompt" rows="3" placeholder="Enter a prompt..."></textarea>

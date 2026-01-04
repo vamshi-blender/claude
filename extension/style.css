@@ -23,6 +23,33 @@ body {
   margin: 0;
 }
 
+.header-left {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tabs {
+  display: flex;
+  gap: 6px;
+}
+
+.tab-button {
+  border: 1px solid #d6d2c8;
+  background: #fff;
+  color: #3b3a36;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.tab-button.active {
+  background: #1d1d1b;
+  color: #fff;
+  border-color: #1d1d1b;
+}
+
 .header-actions {
   display: flex;
   align-items: center;
@@ -180,4 +207,39 @@ body {
   margin: 0;
   white-space: pre-wrap;
   font-family: "Segoe UI", Tahoma, Arial, sans-serif;
+}
+
+.recorder {
+  padding: 16px;
+  background: #f7f7f5;
+}
+
+.recorder-card {
+  background: #fff;
+  border: 1px solid #e2e0da;
+  border-radius: 10px;
+  padding: 16px;
+}
+
+.recorder-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.recorder-status {
+  font-size: 13px;
+  color: #4a4a46;
+  margin-bottom: 12px;
+}
+
+.recorder-steps-header {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.recorder-steps ol,
+.recorder-steps-list {
+  padding-left: 18px;
 }

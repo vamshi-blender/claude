@@ -11,6 +11,7 @@ let nativeRequestId = 0;
 const pendingMcpRequests = new Map();
 let lastToolCall = null;
 const activeChatRequests = new Map();
+const recorderSessions = new Map();
 
 chrome.runtime.onInstalled.addListener(async () => {
   try {
@@ -49,6 +50,41 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (entry) {
       entry.controller.abort();
     }
+    sendResponse({ ok: true });
+    return true;
+  }
+  if (message?.type === "RECORDER_START") {
+    startRecording(message.tabId)
+      .then((result) => sendResponse({ ok: true, result }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
+  if (message?.type === "RECORDER_STOP") {
+    stopRecording(message.tabId)
+      .then((result) => sendResponse({ ok: true, result }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
+  if (message?.type === "RECORDER_CLEAR") {
+    clearRecording(message.tabId)
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
+  if (message?.type === "RECORDER_GET") {
+    getRecordingResolved(message.tabId)
+      .then((result) => sendResponse({ ok: true, result }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
+  if (message?.type === "RECORDER_PLAY") {
+    playRecording(message.tabId)
+      .then((result) => sendResponse({ ok: true, result }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
+  if (message?.type === "RECORDER_EVENT") {
+    void handleRecorderEvent(sender?.tab?.id, message.step);
     sendResponse({ ok: true });
     return true;
   }
@@ -108,6 +144,234 @@ function setLastTool(tool) {
     ...tool,
     timestamp: Date.now()
   };
+}
+
+async function startRecording(tabId) {
+  const targetTabId = await resolveTabId(tabId, null);
+  if (!targetTabId) {
+    throw new Error("No tab available to record.");
+  }
+  const session = { steps: [], isRecording: true };
+  recorderSessions.set(targetTabId, session);
+  await saveRecorderSession(targetTabId, session);
+  try {
+    await chrome.tabs.sendMessage(targetTabId, { type: "RECORDER_SET_ACTIVE", active: true, paused: false });
+  } catch (error) {
+    await chrome.scripting.executeScript({
+      target: { tabId: targetTabId },
+      files: ["recorder-content.js"]
+    });
+    await chrome.tabs.sendMessage(targetTabId, { type: "RECORDER_SET_ACTIVE", active: true, paused: false });
+  }
+  return { tabId: targetTabId };
+}
+
+async function stopRecording(tabId) {
+  const targetTabId = await resolveTabId(tabId, null);
+  if (!targetTabId) {
+    throw new Error("No tab available to stop.");
+  }
+  const session = recorderSessions.get(targetTabId);
+  if (session) {
+    session.isRecording = false;
+    await saveRecorderSession(targetTabId, session);
+  }
+  await chrome.tabs.sendMessage(targetTabId, { type: "RECORDER_SET_ACTIVE", active: false, paused: false });
+  return { tabId: targetTabId };
+}
+
+async function clearRecording(tabId) {
+  const targetTabId = await resolveTabId(tabId, null);
+  if (!targetTabId) {
+    return;
+  }
+  const session = { steps: [], isRecording: false };
+  recorderSessions.set(targetTabId, session);
+  await saveRecorderSession(targetTabId, session);
+}
+
+async function getRecordingResolved(tabId) {
+  const targetTabId = await resolveTabId(tabId, null);
+  if (!targetTabId) {
+    return { tabId: null, steps: [], isRecording: false };
+  }
+  let session = recorderSessions.get(targetTabId);
+  if (!session) {
+    session = await loadRecorderSession(targetTabId);
+  }
+  if (!session) {
+    return { tabId: targetTabId, steps: [], isRecording: false };
+  }
+  return { tabId: targetTabId, steps: session.steps, isRecording: session.isRecording };
+}
+
+function getRecorderStorage() {
+  return chrome.storage?.session || chrome.storage.local;
+}
+
+async function loadRecorderSession(tabId) {
+  const storage = getRecorderStorage();
+  const key = `recorder_session_${tabId}`;
+  const data = await storage.get(key);
+  const session = data?.[key];
+  if (session && Array.isArray(session.steps)) {
+    recorderSessions.set(tabId, session);
+    return session;
+  }
+  return null;
+}
+
+async function saveRecorderSession(tabId, session) {
+  const storage = getRecorderStorage();
+  const key = `recorder_session_${tabId}`;
+  await storage.set({ [key]: session });
+}
+
+async function handleRecorderEvent(tabId, step) {
+  if (!tabId || !step) {
+    return;
+  }
+  let session = recorderSessions.get(tabId);
+  if (!session) {
+    session = await loadRecorderSession(tabId);
+  }
+  if (!session || !session.isRecording) {
+    return;
+  }
+  const enriched = await enrichStepWithCdp(tabId, step);
+  session.steps.push(enriched);
+  recorderSessions.set(tabId, session);
+  await saveRecorderSession(tabId, session);
+}
+
+async function playRecording(tabId) {
+  const targetTabId = await resolveTabId(tabId, null);
+  if (!targetTabId) {
+    throw new Error("No tab available to play.");
+  }
+  const recording = await getRecordingResolved(targetTabId);
+  for (const step of recording.steps) {
+    await executeRecorderStep(targetTabId, step);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+  return { ok: true, steps: recording.steps.length };
+}
+
+async function executeRecorderStep(tabId, step) {
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (stepData) => {
+      const findByCss = (css) => {
+        try {
+          return css ? document.querySelector(css) : null;
+        } catch {
+          return null;
+        }
+      };
+      const findByXPath = (xpath) => {
+        try {
+          if (!xpath) return null;
+          const result = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+          return result.singleNodeValue;
+        } catch {
+          return null;
+        }
+      };
+      const findByText = (text) => {
+        if (!text) return null;
+        const candidates = Array.from(document.querySelectorAll("button, a, input, textarea, select, [role]"));
+        return candidates.find((el) => (el.textContent || "").trim().includes(text));
+      };
+      const findByAria = (aria) => {
+        if (!aria) return null;
+        if (aria.label) {
+          const labelMatch = document.querySelector(`[aria-label=\"${aria.label}\"]`);
+          if (labelMatch) return labelMatch;
+        }
+        return null;
+      };
+      const findByPierce = (pierce) => {
+        if (!pierce) return null;
+        const parts = pierce.split(">>>").map((part) => part.trim()).filter(Boolean);
+        let root = document;
+        let node = null;
+        for (const part of parts) {
+          node = root.querySelector(part);
+          if (!node) return null;
+          if (node.shadowRoot) {
+            root = node.shadowRoot;
+          }
+        }
+        return node;
+      };
+      const selectors = stepData.selectors || {};
+      const element =
+        findByCss(selectors.css) ||
+        findByXPath(selectors.xpath) ||
+        findByPierce(selectors.pierce) ||
+        findByAria(selectors.aria) ||
+        findByText(selectors.text);
+      if (!element) {
+        return { ok: false, error: "Element not found." };
+      }
+      if (stepData.type === "click") {
+        element.click();
+        return { ok: true };
+      }
+      if (stepData.type === "input") {
+        if ("value" in element) {
+          element.value = stepData.value;
+          element.dispatchEvent(new Event("input", { bubbles: true }));
+          element.dispatchEvent(new Event("change", { bubbles: true }));
+          return { ok: true };
+        }
+      }
+      return { ok: false, error: "Unsupported step type." };
+    },
+    args: [step]
+  });
+  return result?.result;
+}
+
+async function enrichStepWithCdp(tabId, step) {
+  if (!step?.selectors?.css) {
+    return step;
+  }
+  try {
+    await ensureDebugger(tabId);
+    const documentResult = await chrome.debugger.sendCommand({ tabId }, "DOM.getDocument", {
+      depth: 1,
+      pierce: true
+    });
+    const rootId = documentResult?.root?.nodeId;
+    if (!rootId) {
+      return step;
+    }
+    const queryResult = await chrome.debugger.sendCommand({ tabId }, "DOM.querySelector", {
+      nodeId: rootId,
+      selector: step.selectors.css
+    });
+    const nodeId = queryResult?.nodeId;
+    if (!nodeId) {
+      return step;
+    }
+    const [nodeInfo, attributes, boxModel] = await Promise.all([
+      chrome.debugger.sendCommand({ tabId }, "DOM.describeNode", { nodeId }),
+      chrome.debugger.sendCommand({ tabId }, "DOM.getAttributes", { nodeId }),
+      chrome.debugger.sendCommand({ tabId }, "DOM.getBoxModel", { nodeId }).catch(() => null)
+    ]);
+    return {
+      ...step,
+      cdp: {
+        nodeId,
+        nodeName: nodeInfo?.node?.nodeName || "",
+        attributes: attributes?.attributes || [],
+        boxModel: boxModel?.model || null
+      }
+    };
+  } catch {
+    return step;
+  }
 }
 
 async function mcpRequest(method, params, timeoutMs = 8000) {

@@ -33,6 +33,11 @@
       "matches": ["<all_urls>"],
       "js": ["accessibility-tree.js"],
       "run_at": "document_start"
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["recorder-content.js"],
+      "run_at": "document_start"
     }
   ],
   "content_security_policy": {
