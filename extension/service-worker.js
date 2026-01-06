@@ -5,33 +5,33 @@ const MAX_TOOL_LOOPS = 50;
 const consoleBuffer = new Map();
 const networkBuffer = new Map();
 const screenshotStore = new Map();
-let mcpGroupId = null;
+// Removed global mcpGroupId - each tab group is independent
 let nativePort = null;
 let nativeRequestId = 0;
 const pendingMcpRequests = new Map();
 let lastToolCall = null;
+let toolCallSequence = 0;
 const activeChatRequests = new Map();
 const recorderSessions = new Map();
 
 chrome.runtime.onInstalled.addListener(async () => {
-  try {
-    await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
-  } catch (error) {
-    console.warn("Failed to set side panel behavior", error);
-  }
+  // Side panel will be opened manually via chrome.action.onClicked
+  // Do NOT set openPanelOnActionClick: true as it conflicts with manual handling
 });
 
 chrome.action.onClicked.addListener(async (tab) => {
   if (!tab || typeof tab.id !== "number") {
     return;
   }
-  await ensureMcpGroup(tab);
-  await chrome.sidePanel.setOptions({
+  // Fire side panel open immediately without awaiting (like reference extension)
+  chrome.sidePanel.setOptions({
     tabId: tab.id,
     path: `sidepanel.html?tabId=${encodeURIComponent(tab.id)}`,
     enabled: true
   });
-  await chrome.sidePanel.open({ tabId: tab.id });
+  chrome.sidePanel.open({ tabId: tab.id });
+  // Then handle group creation
+  await ensureMcpGroup(tab);
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -88,6 +88,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ ok: true });
     return true;
   }
+  if (message?.type === "RESET_TOOL_CALLS") {
+    lastToolCall = null;
+    toolCallSequence = 0;
+    sendResponse({ ok: true });
+    return true;
+  }
 });
 
 async function ensureNativePort() {
@@ -140,10 +146,22 @@ function handleNativeMessage(message) {
 }
 
 function setLastTool(tool) {
+  toolCallSequence++;
   lastToolCall = {
     ...tool,
+    sequence: toolCallSequence,
     timestamp: Date.now()
   };
+}
+
+function setLastToolResponse(response) {
+  if (lastToolCall) {
+    lastToolCall = {
+      ...lastToolCall,
+      response,
+      responseTimestamp: Date.now()
+    };
+  }
 }
 
 async function startRecording(tabId) {
@@ -486,62 +504,76 @@ async function handleChatRequest(message) {
 
   try {
     while (loops < MAX_TOOL_LOOPS) {
-    if (controller.signal.aborted) {
-      return { assistantMessage: "Paused by user.", paused: true };
-    }
-    loops += 1;
-    const response = await callOpenAI(openaiApiKey, model, messages, tools, controller.signal);
-    const assistant = response?.choices?.[0]?.message;
-    if (!assistant) {
-      return { assistantMessage: "No response from model." };
-    }
-
-    messages = [...messages, assistant];
-
-    const toolCalls = assistant.tool_calls || [];
-    if (toolCalls.length === 0) {
-      return { assistantMessage: assistant.content || "Done." };
-    }
-
-    for (const toolCall of toolCalls) {
       if (controller.signal.aborted) {
         return { assistantMessage: "Paused by user.", paused: true };
       }
-      setLastTool({
-        name: toolCall.function?.name || "unknown",
-        args: safeParseJson(toolCall.function?.arguments || "{}") || {}
-      });
-      let result;
-      const toolName = toolCall.function?.name;
-      const toolArgs = safeParseJson(toolCall.function?.arguments || "{}") || {};
-      try {
+      loops += 1;
+      const assistant = await callOpenAIStreaming(
+        openaiApiKey,
+        model,
+        messages,
+        tools,
+        controller.signal,
+        (delta) => {
+          if (delta && requestId) {
+            chrome.runtime.sendMessage({ type: "CHAT_STREAM", requestId, delta });
+          }
+        }
+      );
+      if (!assistant) {
+        return { assistantMessage: "No response from model." };
+      }
+
+      messages = [...messages, assistant];
+
+      const toolCalls = assistant.tool_calls || [];
+      if (toolCalls.length === 0) {
+        if (requestId) {
+          chrome.runtime.sendMessage({ type: "CHAT_STREAM_DONE", requestId });
+        }
+        return { assistantMessage: assistant.content || "Done." };
+      }
+
+      for (const toolCall of toolCalls) {
         if (controller.signal.aborted) {
           return { assistantMessage: "Paused by user.", paused: true };
         }
-        if (toolName === "computer") {
+        setLastTool({
+          name: toolCall.function?.name || "unknown",
+          args: safeParseJson(toolCall.function?.arguments || "{}") || {}
+        });
+        let result;
+        const toolName = toolCall.function?.name;
+        const toolArgs = safeParseJson(toolCall.function?.arguments || "{}") || {};
+        try {
+          if (controller.signal.aborted) {
+            return { assistantMessage: "Paused by user.", paused: true };
+          }
+          if (toolName === "computer") {
+            result = await executeToolLocal(toolName, toolArgs, tabId);
+          } else {
+            result = await mcpRequest("tools/call", {
+              name: toolName,
+              arguments: toolArgs,
+              tabId
+            });
+            console.log("[tool] MCP call", toolName, toolCall.function?.arguments);
+          }
+        } catch (error) {
+          console.warn("[tool] MCP failed, using local", toolName, error.message || error);
           result = await executeToolLocal(toolName, toolArgs, tabId);
-        } else {
-          result = await mcpRequest("tools/call", {
-            name: toolName,
-            arguments: toolArgs,
-            tabId
-          });
-          console.log("[tool] MCP call", toolName, toolCall.function?.arguments);
         }
-      } catch (error) {
-        console.warn("[tool] MCP failed, using local", toolName, error.message || error);
-        result = await executeToolLocal(toolName, toolArgs, tabId);
+        setLastToolResponse(result);
+        messages = [
+          ...messages,
+          {
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: JSON.stringify(result)
+          }
+        ];
       }
-      messages = [
-        ...messages,
-        {
-          role: "tool",
-          tool_call_id: toolCall.id,
-          content: JSON.stringify(result)
-        }
-      ];
     }
-  }
 
     return {
       assistantMessage: `Paused after ${MAX_TOOL_LOOPS} tool calls. Click Continue to proceed.`,
@@ -715,8 +747,9 @@ async function toolComputer(args, fallbackTabId) {
     return { ok: true, imageId: id, dataUrl: image };
   }
   if (action === "wait") {
-    const duration = clamp(args.duration || 1, 0, 30);
-    await new Promise((resolve) => setTimeout(resolve, duration * 1000));
+    // Duration is in milliseconds, clamped between 0 and 30000ms (30 seconds)
+    const duration = clamp(args.duration || 1000, 0, 30000);
+    await new Promise((resolve) => setTimeout(resolve, duration));
     return { ok: true };
   }
 
@@ -931,15 +964,19 @@ async function toolTabsContext() {
     return { ok: false, error: "No active tab." };
   }
   const groupId = activeTab.groupId;
-  let tabs;
-  if (groupId && groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
-    tabs = await chrome.tabs.query({ groupId });
-  } else {
-    tabs = await chrome.tabs.query({ windowId: activeTab.windowId });
+  // Only return tabs from the current tab's group - enforce isolation
+  if (!groupId || groupId === chrome.tabGroups.TAB_GROUP_ID_NONE) {
+    // Tab is not in a group - only return this tab
+    return {
+      ok: true,
+      groupId: null,
+      tabs: [{ id: activeTab.id, title: activeTab.title, url: activeTab.url }]
+    };
   }
+  const tabs = await chrome.tabs.query({ groupId });
   return {
     ok: true,
-    groupId: groupId || null,
+    groupId: groupId,
     tabs: tabs.map((tab) => ({ id: tab.id, title: tab.title, url: tab.url }))
   };
 }
@@ -957,53 +994,65 @@ async function toolTabsCreate() {
 }
 
 async function toolTabsContextMcp(args) {
-  if (mcpGroupId === null) {
-    if (args?.createIfEmpty) {
-      const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (!activeTab || typeof activeTab.id !== "number") {
-        return { ok: false, error: "No active tab for MCP group." };
-      }
-      mcpGroupId = await chrome.tabs.group({ tabIds: activeTab.id });
-      if (!isScriptableUrl(activeTab.url)) {
-        const newTab = await chrome.tabs.create({ windowId: activeTab.windowId, url: "about:blank" });
-        if (newTab.id) {
-          await chrome.tabs.group({ tabIds: newTab.id, groupId: mcpGroupId });
-          return { ok: true, groupId: mcpGroupId, tabs: [newTab.id] };
-        }
-      }
-      return { ok: true, groupId: mcpGroupId, tabs: [activeTab.id] };
-    }
-    return { ok: true, groupId: null, tabs: [] };
+  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!activeTab || typeof activeTab.id !== "number") {
+    return { ok: false, error: "No active tab." };
   }
-  const tabs = await chrome.tabs.query({ groupId: mcpGroupId });
-  return { ok: true, groupId: mcpGroupId, tabs: tabs.map((tab) => tab.id) };
+  const groupId = activeTab.groupId;
+  // If tab is already in a group, return that group's tabs
+  if (groupId && groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
+    const tabs = await chrome.tabs.query({ groupId });
+    return { ok: true, groupId, tabs: tabs.map((tab) => tab.id) };
+  }
+  // Tab is not in a group
+  if (args?.createIfEmpty) {
+    const newGroupId = await chrome.tabs.group({ tabIds: activeTab.id });
+    await chrome.tabGroups.update(newGroupId, {
+      title: "Prompt Navigator",
+      color: "blue"
+    });
+    if (!isScriptableUrl(activeTab.url)) {
+      const newTab = await chrome.tabs.create({ windowId: activeTab.windowId, url: "about:blank" });
+      if (newTab.id) {
+        await chrome.tabs.group({ tabIds: newTab.id, groupId: newGroupId });
+        return { ok: true, groupId: newGroupId, tabs: [newTab.id] };
+      }
+    }
+    return { ok: true, groupId: newGroupId, tabs: [activeTab.id] };
+  }
+  return { ok: true, groupId: null, tabs: [activeTab.id] };
 }
 
 async function toolTabsCreateMcp() {
-  if (mcpGroupId === null) {
+  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!activeTab || typeof activeTab.id !== "number") {
+    return { ok: false, error: "No active tab." };
+  }
+  const groupId = activeTab.groupId;
+  // If tab is not in a group, create a group first
+  if (!groupId || groupId === chrome.tabGroups.TAB_GROUP_ID_NONE) {
     const context = await toolTabsContextMcp({ createIfEmpty: true });
     return { ok: true, tabId: context.tabs?.[0] || null };
   }
-  const tabs = await chrome.tabs.query({ groupId: mcpGroupId });
-  if (!tabs.length) {
-    const context = await toolTabsContextMcp({ createIfEmpty: true });
-    return { ok: true, tabId: context.tabs?.[0] || null };
-  }
-  const newTab = await chrome.tabs.create({ windowId: tabs[0].windowId, url: "about:blank" });
+  // Create a new tab in the current group
+  const newTab = await chrome.tabs.create({ windowId: activeTab.windowId, url: "about:blank" });
   if (newTab.id) {
-    await chrome.tabs.group({ tabIds: newTab.id, groupId: mcpGroupId });
+    await chrome.tabs.group({ tabIds: newTab.id, groupId });
   }
   return { ok: true, tabId: newTab.id };
 }
 
 async function ensureMcpGroup(tab) {
-  if (mcpGroupId !== null) {
-    return mcpGroupId;
+  // If tab is already in a group, use that group
+  if (tab.groupId && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
+    return tab.groupId;
   }
-  const groupId = tab.groupId && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE
-    ? tab.groupId
-    : await chrome.tabs.group({ tabIds: tab.id });
-  mcpGroupId = groupId;
+  // Create a new group for this tab
+  const groupId = await chrome.tabs.group({ tabIds: tab.id });
+  await chrome.tabGroups.update(groupId, {
+    title: "Prompt Navigator",
+    color: "blue"
+  });
   return groupId;
 }
 
@@ -1121,16 +1170,22 @@ async function resolveTabId(requested, fallback) {
   if (typeof fallback === "number") {
     return fallback;
   }
-  if (mcpGroupId !== null) {
-    const groupTabs = await chrome.tabs.query({ groupId: mcpGroupId });
+  // Get the active tab and use its group for resolution
+  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!activeTab) {
+    return null;
+  }
+  const groupId = activeTab.groupId;
+  // If active tab is in a group, prefer tabs from that group
+  if (groupId && groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
+    const groupTabs = await chrome.tabs.query({ groupId });
     if (groupTabs.length) {
       const scriptable = groupTabs.find((tab) => isScriptableUrl(tab.url));
       const active = groupTabs.find((tab) => tab.active);
       return (scriptable || active || groupTabs[0]).id || null;
     }
   }
-  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  return activeTab?.id || null;
+  return activeTab.id || null;
 }
 
 function isScriptableUrl(url) {
@@ -1342,6 +1397,115 @@ async function callOpenAI(apiKey, model, messages, tools, signal) {
     throw new Error(`OpenAI error: ${response.status} ${text}`);
   }
   return response.json();
+}
+
+async function callOpenAIStreaming(apiKey, model, messages, tools, signal, onDelta) {
+  const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`
+    },
+    signal,
+    body: JSON.stringify({
+      model,
+      messages,
+      tools,
+      tool_choice: "auto",
+      stream: true
+    })
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`OpenAI error: ${response.status} ${text}`);
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error("Streaming not supported by response body.");
+  }
+
+  let buffer = "";
+  let content = "";
+  const toolCalls = new Map();
+
+  const flushEvent = (data) => {
+    if (!data || data === "[DONE]") {
+      return;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(data);
+    } catch {
+      return;
+    }
+    const choice = parsed?.choices?.[0];
+    const delta = choice?.delta || {};
+    if (delta.content) {
+      content += delta.content;
+      if (onDelta) {
+        onDelta(delta.content);
+      }
+    }
+    if (Array.isArray(delta.tool_calls)) {
+      for (const call of delta.tool_calls) {
+        const index = call.index;
+        if (typeof index !== "number") {
+          continue;
+        }
+        const existing =
+          toolCalls.get(index) || {
+            id: call.id,
+            type: call.type || "function",
+            function: { name: call.function?.name || "", arguments: "" }
+          };
+        if (call.id) {
+          existing.id = call.id;
+        }
+        if (call.function?.name) {
+          existing.function.name = call.function.name;
+        }
+        if (call.function?.arguments) {
+          existing.function.arguments += call.function.arguments;
+        }
+        toolCalls.set(index, existing);
+      }
+    }
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += new TextDecoder().decode(value, { stream: true });
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary !== -1) {
+      const chunk = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      const lines = chunk.split("\n");
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) {
+          continue;
+        }
+        const data = trimmed.slice(5).trim();
+        flushEvent(data);
+      }
+      boundary = buffer.indexOf("\n\n");
+    }
+  }
+
+  const orderedToolCalls = Array.from(toolCalls.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map((entry) => entry[1]);
+
+  return {
+    role: "assistant",
+    content,
+    tool_calls: orderedToolCalls.length ? orderedToolCalls : undefined
+  };
 }
 
 function safeParseJson(value) {

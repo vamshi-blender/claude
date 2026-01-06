@@ -24,8 +24,13 @@
       <div id="messages" class="messages"></div>
     </main>
     <section id="tool-debug" class="tool-debug">
-      <div class="tool-debug-header">Last tool</div>
-      <pre id="last-tool" class="tool-debug-body">None</pre>
+      <div class="tool-debug-header" id="tool-debug-toggle">
+        <span>Tool Calls</span>
+        <span class="tool-debug-arrow">▼</span>
+      </div>
+      <div id="tool-debug-content" class="tool-debug-content collapsed">
+        <div id="tool-calls-list" class="tool-calls-list"></div>
+      </div>
     </section>
     <section id="recorder-view" class="recorder hidden">
       <div id="recorder-login" class="recorder-card hidden">

@@ -2,11 +2,19 @@
   box-sizing: border-box;
 }
 
-body {
+html, body {
   margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
   font-family: "Segoe UI", Tahoma, Arial, sans-serif;
   background: #f7f7f5;
   color: #1d1d1b;
+  display: flex;
+  flex-direction: column;
 }
 
 .header {
@@ -16,6 +24,7 @@ body {
   padding: 12px 16px;
   border-bottom: 1px solid #e2e0da;
   background: #fff;
+  flex-shrink: 0;
 }
 
 .header h1 {
@@ -65,9 +74,11 @@ body {
 }
 
 .chat {
-  height: calc(100vh - 140px);
-  overflow: auto;
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding: 12px 16px;
+  min-height: 0;
 }
 
 .messages {
@@ -101,6 +112,7 @@ body {
   padding: 12px 16px;
   border-top: 1px solid #e2e0da;
   background: #fff;
+  flex-shrink: 0;
 }
 
 .composer textarea {
@@ -193,25 +205,90 @@ body {
 .tool-debug {
   border-top: 1px solid #e2e0da;
   background: #faf9f6;
-  padding: 8px 16px;
   font-size: 12px;
   color: #4a4a46;
+  flex-shrink: 0;
 }
 
 .tool-debug-header {
   font-weight: 600;
-  margin-bottom: 4px;
+  padding: 8px 16px;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  user-select: none;
 }
 
-.tool-debug-body {
-  margin: 0;
+.tool-debug-header:hover {
+  background: #f0efe9;
+}
+
+.tool-debug-arrow {
+  transition: transform 0.2s;
+  font-size: 10px;
+}
+
+.tool-debug-arrow.expanded {
+  transform: rotate(-180deg);
+}
+
+.tool-debug-content {
+  max-height: 300px;
+  overflow-y: auto;
+  transition: max-height 0.3s ease;
+}
+
+.tool-debug-content.collapsed {
+  max-height: 0;
+  overflow: hidden;
+}
+
+.tool-calls-list {
+  padding: 0 16px 8px 16px;
+}
+
+.tool-call-item {
+  background: #fff;
+  border: 1px solid #e2e0da;
+  border-radius: 6px;
+  padding: 8px;
+  margin-bottom: 8px;
+  font-size: 11px;
+}
+
+.tool-call-header {
+  font-weight: 600;
+  margin-bottom: 4px;
+  color: #1d1d1b;
+}
+
+.tool-call-section {
+  margin-top: 6px;
+}
+
+.tool-call-label {
+  font-weight: 600;
+  color: #6d6b66;
+  margin-bottom: 2px;
+}
+
+.tool-call-data {
+  background: #f7f7f5;
+  padding: 4px 6px;
+  border-radius: 4px;
   white-space: pre-wrap;
-  font-family: "Segoe UI", Tahoma, Arial, sans-serif;
+  font-family: "Consolas", "Monaco", monospace;
+  font-size: 10px;
+  overflow-x: auto;
 }
 
 .recorder {
   padding: 16px;
   background: #f7f7f5;
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
 }
 
 .recorder-card {

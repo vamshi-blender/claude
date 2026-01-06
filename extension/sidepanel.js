@@ -4,13 +4,15 @@ const sendEl = document.getElementById("send");
 const statusEl = document.getElementById("status");
 const optionsEl = document.getElementById("open-options");
 const clearEl = document.getElementById("clear-chat");
-const lastToolEl = document.getElementById("last-tool");
 const continueEl = document.getElementById("continue");
 const tabChatEl = document.getElementById("tab-chat");
 const tabRecorderEl = document.getElementById("tab-recorder");
 const chatViewEl = document.getElementById("chat-view");
 const recorderViewEl = document.getElementById("recorder-view");
 const toolDebugEl = document.getElementById("tool-debug");
+const toolDebugToggle = document.getElementById("tool-debug-toggle");
+const toolDebugContent = document.getElementById("tool-debug-content");
+const toolCallsList = document.getElementById("tool-calls-list");
 const recorderLoginEl = document.getElementById("recorder-login");
 const recorderPanelEl = document.getElementById("recorder-panel");
 const recorderEmailEl = document.getElementById("recorder-email");
@@ -26,6 +28,9 @@ const recorderStepsListEl = document.getElementById("recorder-steps-list");
 let isBusy = false;
 let currentRequestId = null;
 let recorderPollTimer = null;
+let toolCalls = [];
+let lastToolCall = null;
+const streamingMessages = new Map();
 
 const tabParam = new URLSearchParams(window.location.search).get("tabId");
 const parsedTabId = tabParam ? Number(tabParam) : null;
@@ -46,6 +51,7 @@ sendEl.addEventListener("click", () => {
 continueEl.addEventListener("click", () => handleContinue());
 tabChatEl.addEventListener("click", () => switchTab("chat"));
 tabRecorderEl.addEventListener("click", () => switchTab("recorder"));
+toolDebugToggle.addEventListener("click", () => toggleToolDebug());
 recorderLoginBtn.addEventListener("click", () => handleRecorderLogin());
 recordStartEl.addEventListener("click", () => handleRecorderStart());
 recordStopEl.addEventListener("click", () => handleRecorderStop());
@@ -65,6 +71,15 @@ promptEl.addEventListener("keydown", (event) => {
 loadHistory().then(renderHistory).catch(() => {});
 setInterval(updateLastTool, 1000);
 initRecorderView();
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type === "CHAT_STREAM") {
+    handleStreamChunk(message.requestId, message.delta);
+  }
+  if (message?.type === "CHAT_STREAM_DONE") {
+    finalizeStream(message.requestId);
+  }
+});
 
 async function handleSend() {
   if (isBusy) {
@@ -94,13 +109,21 @@ async function handleSend() {
     }
 
     const assistantMessage = response.result?.assistantMessage || "Done.";
-    addMessage({ role: "assistant", content: assistantMessage });
+    if (currentRequestId && streamingMessages.has(currentRequestId)) {
+      updateStreamMessage(currentRequestId, assistantMessage, true);
+    } else {
+      addMessage({ role: "assistant", content: assistantMessage });
+    }
     setStatus("");
     if (response.result?.paused) {
       showContinue(true);
     }
   } catch (error) {
-    addMessage({ role: "assistant", content: `Error: ${error.message}` });
+    if (currentRequestId && streamingMessages.has(currentRequestId)) {
+      updateStreamMessage(currentRequestId, `Error: ${error.message}`, true);
+    } else {
+      addMessage({ role: "assistant", content: `Error: ${error.message}` });
+    }
     setStatus("Failed");
   } finally {
     isBusy = false;
@@ -129,10 +152,24 @@ function renderMessage(message) {
   row.className = `message ${message.role}`;
   row.textContent = message.content;
   messagesEl.appendChild(row);
+  return row;
 }
 
 function setStatus(text) {
   statusEl.textContent = text;
+}
+
+function toggleToolDebug() {
+  const isCollapsed = toolDebugContent.classList.contains("collapsed");
+  const arrow = toolDebugToggle.querySelector(".tool-debug-arrow");
+
+  if (isCollapsed) {
+    toolDebugContent.classList.remove("collapsed");
+    arrow.classList.add("expanded");
+  } else {
+    toolDebugContent.classList.add("collapsed");
+    arrow.classList.remove("expanded");
+  }
 }
 
 async function updateLastTool() {
@@ -141,11 +178,95 @@ async function updateLastTool() {
     if (!response?.ok) {
       return;
     }
-    lastToolEl.textContent = response.tool
-      ? JSON.stringify(response.tool, null, 2)
-      : "None";
+    const tool = response.tool;
+    if (!tool) {
+      return;
+    }
+
+    // Check if this is a new tool call or an update with response
+    if (!lastToolCall || tool.timestamp !== lastToolCall.timestamp) {
+      // New tool call
+      lastToolCall = tool;
+      toolCalls.push({ ...tool });
+      // Limit to last 50 tool calls
+      if (toolCalls.length > 50) {
+        toolCalls.shift();
+      }
+      renderToolCalls();
+    } else if (tool.response !== undefined && lastToolCall.response === undefined) {
+      // Update with response
+      lastToolCall = tool;
+      const index = toolCalls.findIndex(c => c.timestamp === tool.timestamp);
+      if (index !== -1) {
+        toolCalls[index] = { ...tool };
+        renderToolCalls();
+      }
+    }
   } catch {
     // ignore polling errors
+  }
+}
+
+function renderToolCalls() {
+  if (toolCalls.length === 0) {
+    toolCallsList.innerHTML = '<div style="padding: 8px; color: #6d6b66;">No tool calls yet</div>';
+    return;
+  }
+
+  toolCallsList.innerHTML = "";
+  // Show oldest first (chronological order)
+  for (let i = 0; i < toolCalls.length; i++) {
+    const call = toolCalls[i];
+    const item = document.createElement("div");
+    item.className = "tool-call-item";
+
+    const header = document.createElement("div");
+    header.className = "tool-call-header";
+    const sequenceNum = call.sequence || (i + 1);
+    header.textContent = `#${sequenceNum} - ${call.name}`;
+    item.appendChild(header);
+
+    const argsSection = document.createElement("div");
+    argsSection.className = "tool-call-section";
+    const argsLabel = document.createElement("div");
+    argsLabel.className = "tool-call-label";
+    argsLabel.textContent = "Arguments:";
+    argsSection.appendChild(argsLabel);
+    const argsData = document.createElement("div");
+    argsData.className = "tool-call-data";
+    argsData.textContent = JSON.stringify(call.args, null, 2);
+    argsSection.appendChild(argsData);
+    item.appendChild(argsSection);
+
+    if (call.response !== null && call.response !== undefined) {
+      const responseSection = document.createElement("div");
+      responseSection.className = "tool-call-section";
+      const responseLabel = document.createElement("div");
+      responseLabel.className = "tool-call-label";
+      responseLabel.textContent = "Response:";
+      responseSection.appendChild(responseLabel);
+      const responseData = document.createElement("div");
+      responseData.className = "tool-call-data";
+      responseData.textContent = JSON.stringify(call.response, null, 2);
+      responseSection.appendChild(responseData);
+      item.appendChild(responseSection);
+    } else {
+      const loadingSection = document.createElement("div");
+      loadingSection.className = "tool-call-section";
+      const loadingLabel = document.createElement("div");
+      loadingLabel.className = "tool-call-label";
+      loadingLabel.textContent = "Response:";
+      loadingSection.appendChild(loadingLabel);
+      const loadingData = document.createElement("div");
+      loadingData.className = "tool-call-data";
+      loadingData.style.fontStyle = "italic";
+      loadingData.style.color = "#6d6b66";
+      loadingData.textContent = "Waiting...";
+      loadingSection.appendChild(loadingData);
+      item.appendChild(loadingSection);
+    }
+
+    toolCallsList.appendChild(item);
   }
 }
 
@@ -166,8 +287,13 @@ async function clearChat() {
     await handlePause();
   }
   history = [];
+  toolCalls = [];
+  lastToolCall = null;
+  streamingMessages.clear();
+  await chrome.runtime.sendMessage({ type: "RESET_TOOL_CALLS" });
   await chrome.storage.local.remove(historyKey);
   messagesEl.innerHTML = "";
+  renderToolCalls();
   setStatus("");
   showContinue(false);
 }
@@ -193,13 +319,21 @@ async function handleContinue() {
       throw new Error(response?.error || "Request failed.");
     }
     const assistantMessage = response.result?.assistantMessage || "Done.";
-    addMessage({ role: "assistant", content: assistantMessage });
+    if (currentRequestId && streamingMessages.has(currentRequestId)) {
+      updateStreamMessage(currentRequestId, assistantMessage, true);
+    } else {
+      addMessage({ role: "assistant", content: assistantMessage });
+    }
     setStatus("");
     if (response.result?.paused) {
       showContinue(true);
     }
   } catch (error) {
-    addMessage({ role: "assistant", content: `Error: ${error.message}` });
+    if (currentRequestId && streamingMessages.has(currentRequestId)) {
+      updateStreamMessage(currentRequestId, `Error: ${error.message}`, true);
+    } else {
+      addMessage({ role: "assistant", content: `Error: ${error.message}` });
+    }
     setStatus("Failed");
   } finally {
     isBusy = false;
@@ -210,6 +344,57 @@ async function handleContinue() {
 
 function showContinue(show) {
   continueEl.classList.toggle("hidden", !show);
+}
+
+function ensureStreamMessage(requestId) {
+  if (!requestId) {
+    return null;
+  }
+  const existing = streamingMessages.get(requestId);
+  if (existing) {
+    return existing;
+  }
+  const message = { role: "assistant", content: "" };
+  history.push(message);
+  const row = renderMessage(message);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  const entry = { index: history.length - 1, row, content: "" };
+  streamingMessages.set(requestId, entry);
+  return entry;
+}
+
+function handleStreamChunk(requestId, delta) {
+  if (!delta) {
+    return;
+  }
+  const entry = ensureStreamMessage(requestId);
+  if (!entry) {
+    return;
+  }
+  entry.content += delta;
+  entry.row.textContent = entry.content;
+}
+
+function updateStreamMessage(requestId, content, finalize) {
+  const entry = ensureStreamMessage(requestId);
+  if (!entry) {
+    return;
+  }
+  entry.content = content;
+  entry.row.textContent = content;
+  if (finalize) {
+    history[entry.index].content = content;
+    saveHistory().catch(() => {});
+    streamingMessages.delete(requestId);
+  }
+}
+
+function finalizeStream(requestId) {
+  const entry = streamingMessages.get(requestId);
+  if (!entry) {
+    return;
+  }
+  entry.done = true;
 }
 
 async function handlePause() {

@@ -6,9 +6,6 @@
   "action": {
     "default_title": "Open Prompt Navigator"
   },
-  "side_panel": {
-    "default_path": "sidepanel.html"
-  },
   "options_page": "options.html",
   "background": {
     "service_worker": "service-worker.js"
