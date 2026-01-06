@@ -472,8 +472,12 @@ async function handleChatRequest(message) {
     role: "system",
     content:
       "You are a browser automation agent. Use the available tools to navigate, " +
-      "read pages, and interact with web content. If you need a tab id, use tabs_context " +
-      "or tabs_context_mcp first."
+      "read pages, and interact with web content. Behave like a careful human: " +
+      "load pages, wait for content, click visible elements, and only type after " +
+      "focusing an input. Capture a screenshot after each action when it helps " +
+      "verify the UI state or the result of the last step. If the current tab is not a normal web page (e.g. chrome://), " +
+      "navigate to a regular URL first. If you need a tab id, use tabs_context or " +
+      "tabs_context_mcp first."
   };
 
   const model = openaiModel || "gpt-4o-mini";
@@ -508,19 +512,25 @@ async function handleChatRequest(message) {
         args: safeParseJson(toolCall.function?.arguments || "{}") || {}
       });
       let result;
+      const toolName = toolCall.function?.name;
+      const toolArgs = safeParseJson(toolCall.function?.arguments || "{}") || {};
       try {
         if (controller.signal.aborted) {
           return { assistantMessage: "Paused by user.", paused: true };
         }
-        result = await mcpRequest("tools/call", {
-          name: toolCall.function?.name,
-          arguments: safeParseJson(toolCall.function?.arguments || "{}") || {},
-          tabId
-        });
-        console.log("[tool] MCP call", toolCall.function?.name, toolCall.function?.arguments);
+        if (toolName === "computer") {
+          result = await executeToolLocal(toolName, toolArgs, tabId);
+        } else {
+          result = await mcpRequest("tools/call", {
+            name: toolName,
+            arguments: toolArgs,
+            tabId
+          });
+          console.log("[tool] MCP call", toolName, toolCall.function?.arguments);
+        }
       } catch (error) {
-        console.warn("[tool] MCP failed, using local", toolCall.function?.name, error.message || error);
-        result = await executeToolLocal(toolCall.function?.name, safeParseJson(toolCall.function?.arguments || "{}") || {}, tabId);
+        console.warn("[tool] MCP failed, using local", toolName, error.message || error);
+        result = await executeToolLocal(toolName, toolArgs, tabId);
       }
       messages = [
         ...messages,
@@ -731,10 +741,11 @@ async function toolComputer(args, fallbackTabId) {
   }
 
   if (action === "type") {
-    if (!args.text) {
+    const text = typeof args.text === "string" ? args.text : String(args.text ?? "");
+    if (!text) {
       return { ok: false, error: "type requires text." };
     }
-    await dispatchType(tabId, args.text);
+    await dispatchType(tabId, text);
     return { ok: true };
   }
 
@@ -953,6 +964,13 @@ async function toolTabsContextMcp(args) {
         return { ok: false, error: "No active tab for MCP group." };
       }
       mcpGroupId = await chrome.tabs.group({ tabIds: activeTab.id });
+      if (!isScriptableUrl(activeTab.url)) {
+        const newTab = await chrome.tabs.create({ windowId: activeTab.windowId, url: "about:blank" });
+        if (newTab.id) {
+          await chrome.tabs.group({ tabIds: newTab.id, groupId: mcpGroupId });
+          return { ok: true, groupId: mcpGroupId, tabs: [newTab.id] };
+        }
+      }
       return { ok: true, groupId: mcpGroupId, tabs: [activeTab.id] };
     }
     return { ok: true, groupId: null, tabs: [] };
@@ -1103,8 +1121,32 @@ async function resolveTabId(requested, fallback) {
   if (typeof fallback === "number") {
     return fallback;
   }
+  if (mcpGroupId !== null) {
+    const groupTabs = await chrome.tabs.query({ groupId: mcpGroupId });
+    if (groupTabs.length) {
+      const scriptable = groupTabs.find((tab) => isScriptableUrl(tab.url));
+      const active = groupTabs.find((tab) => tab.active);
+      return (scriptable || active || groupTabs[0]).id || null;
+    }
+  }
   const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   return activeTab?.id || null;
+}
+
+function isScriptableUrl(url) {
+  if (!url) {
+    return false;
+  }
+  const lowered = url.toLowerCase();
+  if (lowered === "about:blank" || lowered === "about:srcdoc") {
+    return true;
+  }
+  return !(
+    lowered.startsWith("chrome://") ||
+    lowered.startsWith("chrome-extension://") ||
+    lowered.startsWith("edge://") ||
+    lowered.startsWith("about:")
+  );
 }
 
 async function ensureDebugger(tabId) {
@@ -1165,17 +1207,41 @@ async function dispatchMouseWheel(tabId, coordinate, deltaX, deltaY) {
 }
 
 async function dispatchType(tabId, text) {
-  await chrome.debugger.sendCommand({ tabId }, "Input.insertText", { text });
+  try {
+    await chrome.debugger.sendCommand({ tabId }, "Input.insertText", { text });
+  } catch (error) {
+    const message = error?.message || "";
+    if (!message.includes("Invalid 'text' parameter")) {
+      throw error;
+    }
+    for (const ch of text) {
+      await dispatchKey(tabId, ch);
+    }
+  }
 }
 
 async function dispatchKey(tabId, key) {
+  const keyText = String(key || "");
+  const specialKeys = {
+    Enter: { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 },
+    Tab: { key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 },
+    Backspace: { key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 },
+    Escape: { key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 },
+    ArrowLeft: { key: "ArrowLeft", code: "ArrowLeft", windowsVirtualKeyCode: 37 },
+    ArrowUp: { key: "ArrowUp", code: "ArrowUp", windowsVirtualKeyCode: 38 },
+    ArrowRight: { key: "ArrowRight", code: "ArrowRight", windowsVirtualKeyCode: 39 },
+    ArrowDown: { key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40 }
+  };
+  const payload =
+    specialKeys[keyText] ||
+    (keyText.length === 1 ? { key: keyText, text: keyText, code: keyText, windowsVirtualKeyCode: keyText.charCodeAt(0) } : { key: keyText, code: keyText });
   await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", {
     type: "keyDown",
-    text: key
+    ...payload
   });
   await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", {
     type: "keyUp",
-    text: key
+    ...payload
   });
 }
 
