@@ -22,6 +22,7 @@ const recordStartEl = document.getElementById("record-start");
 const recordStopEl = document.getElementById("record-stop");
 const recordPlayEl = document.getElementById("record-play");
 const recordClearEl = document.getElementById("record-clear");
+const playbackSpeedEl = document.getElementById("playback-speed");
 const recorderStatusEl = document.getElementById("recorder-status");
 const recorderStepsListEl = document.getElementById("recorder-steps-list");
 
@@ -31,6 +32,8 @@ let recorderPollTimer = null;
 let toolCalls = [];
 let lastToolCall = null;
 const streamingMessages = new Map();
+let recorderAutoScroll = true;
+let currentPlaybackIndex = null;
 
 const tabParam = new URLSearchParams(window.location.search).get("tabId");
 const parsedTabId = tabParam ? Number(tabParam) : null;
@@ -57,6 +60,8 @@ recordStartEl.addEventListener("click", () => handleRecorderStart());
 recordStopEl.addEventListener("click", () => handleRecorderStop());
 recordPlayEl.addEventListener("click", () => handleRecorderPlay());
 recordClearEl.addEventListener("click", () => handleRecorderClear());
+playbackSpeedEl.addEventListener("change", () => handlePlaybackSpeedChange());
+recorderStepsListEl.addEventListener("scroll", () => handleRecorderScroll());
 promptEl.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
@@ -78,6 +83,20 @@ chrome.runtime.onMessage.addListener((message) => {
   }
   if (message?.type === "CHAT_STREAM_DONE") {
     finalizeStream(message.requestId);
+  }
+  if (message?.type === "RECORDER_PLAYBACK_STEP") {
+    if (tabId && message.tabId && tabId !== message.tabId) {
+      return;
+    }
+    currentPlaybackIndex = message.index;
+    applyPlaybackHighlight();
+  }
+  if (message?.type === "RECORDER_PLAYBACK_DONE") {
+    if (tabId && message.tabId && tabId !== message.tabId) {
+      return;
+    }
+    currentPlaybackIndex = null;
+    applyPlaybackHighlight();
   }
 });
 
@@ -150,9 +169,26 @@ function renderHistory() {
 function renderMessage(message) {
   const row = document.createElement("div");
   row.className = `message ${message.role}`;
-  row.textContent = message.content;
+  row.innerHTML = renderMarkdown(message.content);
   messagesEl.appendChild(row);
   return row;
+}
+
+function renderMarkdown(text) {
+  if (typeof marked !== "undefined") {
+    marked.setOptions({
+      breaks: true,
+      gfm: true
+    });
+    return marked.parse(text || "");
+  }
+  return escapeHtml(text || "");
+}
+
+function escapeHtml(text) {
+  const div = document.createElement("div");
+  div.textContent = text;
+  return div.innerHTML;
 }
 
 function setStatus(text) {
@@ -372,7 +408,7 @@ function handleStreamChunk(requestId, delta) {
     return;
   }
   entry.content += delta;
-  entry.row.textContent = entry.content;
+  entry.row.innerHTML = renderMarkdown(entry.content);
 }
 
 function updateStreamMessage(requestId, content, finalize) {
@@ -381,7 +417,7 @@ function updateStreamMessage(requestId, content, finalize) {
     return;
   }
   entry.content = content;
-  entry.row.textContent = content;
+  entry.row.innerHTML = renderMarkdown(content);
   if (finalize) {
     history[entry.index].content = content;
     saveHistory().catch(() => {});
@@ -419,11 +455,17 @@ function switchTab(name) {
 }
 
 async function initRecorderView() {
-  const { recorderLoggedIn } = await chrome.storage.local.get(["recorderLoggedIn"]);
+  const { recorderLoggedIn, recorderPlaybackSpeed } = await chrome.storage.local.get([
+    "recorderLoggedIn",
+    "recorderPlaybackSpeed"
+  ]);
   if (recorderLoggedIn) {
     showRecorderPanel();
   } else {
     showRecorderLogin();
+  }
+  if (recorderPlaybackSpeed) {
+    playbackSpeedEl.value = String(recorderPlaybackSpeed);
   }
   await refreshRecorderSteps();
   startRecorderPolling();
@@ -474,7 +516,9 @@ async function handleRecorderStop() {
 
 async function handleRecorderPlay() {
   recorderStatusEl.textContent = "Playing...";
-  const response = await chrome.runtime.sendMessage({ type: "RECORDER_PLAY", tabId });
+  const speed = Number(playbackSpeedEl.value) || 1;
+  await chrome.storage.local.set({ recorderPlaybackSpeed: speed });
+  const response = await chrome.runtime.sendMessage({ type: "RECORDER_PLAY", tabId, speed });
   if (!response?.ok) {
     recorderStatusEl.textContent = `Error: ${response?.error || "Failed"}`;
     return;
@@ -490,6 +534,8 @@ async function handleRecorderClear() {
 
 async function refreshRecorderSteps() {
   const response = await chrome.runtime.sendMessage({ type: "RECORDER_GET", tabId });
+  const wasNearBottom = isRecorderNearBottom();
+  const prevScrollTop = recorderStepsListEl.scrollTop;
   recorderStepsListEl.innerHTML = "";
   if (!response?.ok) {
     recorderStepsListEl.innerHTML = "<li>Unable to load steps.</li>";
@@ -503,12 +549,47 @@ async function refreshRecorderSteps() {
     recorderStepsListEl.innerHTML = "<li>No steps recorded.</li>";
     return;
   }
-  for (const step of steps) {
+  for (let i = 0; i < steps.length; i += 1) {
+    const step = steps[i];
     const item = document.createElement("li");
-    const label = step.type === "input" ? `Input: ${String(step.value).slice(0, 40)}` : "Click";
-    const selector = step.selectors?.css || step.selectors?.text || "element";
+    item.dataset.stepIndex = String(i);
+    const labelMap = {
+      click: "Click",
+      double_click: "Double click",
+      triple_click: "Triple click",
+      right_click: "Right click",
+      input: `Input: ${String(step.value).slice(0, 40)}`,
+      select_change: `Select: ${String(step.value).slice(0, 40)}`,
+      file_upload: `File upload: ${(step.files || []).join(", ") || "file"}`,
+      keydown: `Key: ${step.key}`,
+      focus: "Focus",
+      blur: "Blur",
+      hover: "Hover",
+      scroll: "Scroll",
+      submit: "Submit",
+      drag_drop: "Drag and drop",
+      navigate: `Navigate: ${step.url || ""}`,
+      reload: "Reload",
+      resize: `Resize: ${step.width}x${step.height}`,
+      wait: `Wait: ${Math.round((step.durationMs || 0) / 100) / 10}s`
+    };
+    const label = labelMap[step.type] || step.type;
+    const selector =
+      step.selectors?.css ||
+      step.selectors?.text ||
+      step.targetSelectors?.css ||
+      step.sourceSelectors?.css ||
+      step.url ||
+      "element";
     item.textContent = `${label} - ${selector}`;
     recorderStepsListEl.appendChild(item);
+  }
+  applyPlaybackHighlight();
+  if (wasNearBottom) {
+    recorderStepsListEl.scrollTo({ top: recorderStepsListEl.scrollHeight, behavior: "smooth" });
+    recorderAutoScroll = true;
+  } else {
+    recorderStepsListEl.scrollTop = prevScrollTop;
   }
 }
 
@@ -517,6 +598,37 @@ function setRecorderControls({ isRecording, hasSteps }) {
   recordStopEl.classList.toggle("hidden", !isRecording);
   recordPlayEl.classList.toggle("hidden", isRecording || !hasSteps);
   recordClearEl.classList.toggle("hidden", isRecording || !hasSteps);
+}
+
+function handlePlaybackSpeedChange() {
+  const speed = Number(playbackSpeedEl.value) || 1;
+  chrome.storage.local.set({ recorderPlaybackSpeed: speed }).catch(() => {});
+}
+
+function handleRecorderScroll() {
+  recorderAutoScroll = isRecorderNearBottom();
+}
+
+function isRecorderNearBottom() {
+  const { scrollTop, clientHeight, scrollHeight } = recorderStepsListEl;
+  return scrollTop + clientHeight >= scrollHeight - 8;
+}
+
+function applyPlaybackHighlight() {
+  const items = recorderStepsListEl.querySelectorAll("li");
+  for (const item of items) {
+    item.classList.remove("recorder-step-active");
+  }
+  if (currentPlaybackIndex === null || currentPlaybackIndex === undefined) {
+    return;
+  }
+  const active = recorderStepsListEl.querySelector(`li[data-step-index="${currentPlaybackIndex}"]`);
+  if (active) {
+    active.classList.add("recorder-step-active");
+    if (recorderAutoScroll) {
+      active.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+  }
 }
 
 function startRecorderPolling() {

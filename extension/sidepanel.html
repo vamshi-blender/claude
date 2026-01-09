@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Prompt Navigator</title>
     <link rel="stylesheet" href="style.css" />
+    <script src="marked.min.js"></script>
   </head>
   <body>
     <header class="header">
@@ -52,10 +53,23 @@
           <button id="record-play" class="secondary">Play</button>
           <button id="record-clear" class="secondary">Clear</button>
         </div>
+        <div class="recorder-controls">
+          <label class="recorder-speed-label" for="playback-speed">Playback speed</label>
+          <select id="playback-speed" class="recorder-speed-select">
+            <option value="0.5">0.5x</option>
+            <option value="0.75">0.75x</option>
+            <option value="1" selected>1x</option>
+            <option value="1.25">1.25x</option>
+            <option value="1.5">1.5x</option>
+            <option value="2">2x</option>
+            <option value="3">3x</option>
+            <option value="4">4x</option>
+          </select>
+        </div>
         <div class="recorder-status" id="recorder-status">Idle</div>
         <div class="recorder-steps">
           <div class="recorder-steps-header">Recorded Steps</div>
-          <ol id="recorder-steps-list"></ol>
+          <ol id="recorder-steps-list" class="recorder-steps-list"></ol>
         </div>
       </div>
     </section>

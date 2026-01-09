@@ -1,6 +1,12 @@
 (function () {
   let isRecording = false;
   let isPaused = false;
+  let lastStepTime = null;
+  let lastHoverTime = 0;
+  let lastHoverTarget = null;
+  let lastScrollTime = 0;
+  let lastScrollPos = { x: 0, y: 0 };
+  let lastDragSource = null;
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.type === "RECORDER_SET_ACTIVE") {
@@ -19,6 +25,18 @@
     if (!isRecording || isPaused) {
       return;
     }
+    const now = Date.now();
+    if (lastStepTime && now - lastStepTime > 1000) {
+      chrome.runtime.sendMessage({
+        type: "RECORDER_EVENT",
+        step: {
+          type: "wait",
+          durationMs: now - lastStepTime,
+          timestamp: now
+        }
+      });
+    }
+    lastStepTime = now;
     chrome.runtime.sendMessage({ type: "RECORDER_EVENT", step });
   }
 
@@ -27,8 +45,24 @@
     if (!(target instanceof Element)) {
       return;
     }
+    const clickType = event.detail >= 3 ? "triple_click" : event.detail === 2 ? "double_click" : "click";
     emitStep({
-      type: "click",
+      type: clickType,
+      url: location.href,
+      title: document.title,
+      timestamp: Date.now(),
+      selectors: buildSelectors(target),
+      text: getTextSnippet(target)
+    });
+  }
+
+  function captureRightClick(event) {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    emitStep({
+      type: "right_click",
       url: location.href,
       title: document.title,
       timestamp: Date.now(),
@@ -45,6 +79,9 @@
     if (target.tagName !== "INPUT" && target.tagName !== "TEXTAREA" && target.tagName !== "SELECT") {
       return;
     }
+    if (target instanceof HTMLInputElement && target.type === "file") {
+      return;
+    }
     emitStep({
       type: "input",
       url: location.href,
@@ -52,6 +89,205 @@
       timestamp: Date.now(),
       selectors: buildSelectors(target),
       value: getInputValue(target)
+    });
+  }
+
+  function captureSelectChange(event) {
+    const target = event.target;
+    if (!(target instanceof HTMLSelectElement)) {
+      return;
+    }
+    emitStep({
+      type: "select_change",
+      url: location.href,
+      title: document.title,
+      timestamp: Date.now(),
+      selectors: buildSelectors(target),
+      value: target.value
+    });
+  }
+
+  function captureFileUpload(event) {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement) || target.type !== "file") {
+      return;
+    }
+    const files = Array.from(target.files || []).map((file) => file.name);
+    emitStep({
+      type: "file_upload",
+      url: location.href,
+      title: document.title,
+      timestamp: Date.now(),
+      selectors: buildSelectors(target),
+      files
+    });
+  }
+
+  function captureKeydown(event) {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    const isEditable =
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      target.isContentEditable;
+    if (isEditable && event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      return;
+    }
+    emitStep({
+      type: "keydown",
+      url: location.href,
+      title: document.title,
+      timestamp: Date.now(),
+      selectors: buildSelectors(target),
+      key: event.key,
+      code: event.code,
+      ctrlKey: event.ctrlKey,
+      metaKey: event.metaKey,
+      altKey: event.altKey,
+      shiftKey: event.shiftKey
+    });
+  }
+
+  function captureFocus(event) {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    emitStep({
+      type: "focus",
+      url: location.href,
+      title: document.title,
+      timestamp: Date.now(),
+      selectors: buildSelectors(target)
+    });
+  }
+
+  function captureBlur(event) {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    emitStep({
+      type: "blur",
+      url: location.href,
+      title: document.title,
+      timestamp: Date.now(),
+      selectors: buildSelectors(target)
+    });
+  }
+
+  function captureHover(event) {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    const now = Date.now();
+    if (target !== lastHoverTarget) {
+      lastHoverTarget = target;
+      lastHoverTime = now;
+      return;
+    }
+    if (now - lastHoverTime < 2000) {
+      return;
+    }
+    lastHoverTime = now;
+    emitStep({
+      type: "hover",
+      url: location.href,
+      title: document.title,
+      timestamp: now,
+      selectors: buildSelectors(target),
+      text: getTextSnippet(target)
+    });
+  }
+
+  function captureScroll(event) {
+    const now = Date.now();
+    if (now - lastScrollTime < 400) {
+      return;
+    }
+    lastScrollTime = now;
+    const target = event.target;
+    if (target === document || target === document.documentElement || target === document.body) {
+      const x = window.scrollX;
+      const y = window.scrollY;
+      if (Math.abs(x - lastScrollPos.x) < 20 && Math.abs(y - lastScrollPos.y) < 20) {
+        return;
+      }
+      lastScrollPos = { x, y };
+      emitStep({
+        type: "scroll",
+        url: location.href,
+        title: document.title,
+        timestamp: now,
+        target: "window",
+        x,
+        y
+      });
+      return;
+    }
+    if (target instanceof Element) {
+      emitStep({
+        type: "scroll",
+        url: location.href,
+        title: document.title,
+        timestamp: now,
+        selectors: buildSelectors(target),
+        x: target.scrollLeft,
+        y: target.scrollTop
+      });
+    }
+  }
+
+  function captureSubmit(event) {
+    const target = event.target;
+    if (!(target instanceof HTMLFormElement)) {
+      return;
+    }
+    emitStep({
+      type: "submit",
+      url: location.href,
+      title: document.title,
+      timestamp: Date.now(),
+      selectors: buildSelectors(target)
+    });
+  }
+
+  function captureDragStart(event) {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    lastDragSource = target;
+  }
+
+  function captureDrop(event) {
+    const target = event.target;
+    if (!(target instanceof Element) || !lastDragSource) {
+      return;
+    }
+    const source = lastDragSource;
+    lastDragSource = null;
+    emitStep({
+      type: "drag_drop",
+      url: location.href,
+      title: document.title,
+      timestamp: Date.now(),
+      sourceSelectors: buildSelectors(source),
+      targetSelectors: buildSelectors(target)
+    });
+  }
+
+  function captureResize() {
+    emitStep({
+      type: "resize",
+      url: location.href,
+      title: document.title,
+      timestamp: Date.now(),
+      width: window.innerWidth,
+      height: window.innerHeight
     });
   }
 
@@ -168,5 +404,17 @@
   }
 
   document.addEventListener("click", captureClick, true);
+  document.addEventListener("contextmenu", captureRightClick, true);
   document.addEventListener("input", captureInput, true);
+  document.addEventListener("change", captureSelectChange, true);
+  document.addEventListener("change", captureFileUpload, true);
+  document.addEventListener("keydown", captureKeydown, true);
+  document.addEventListener("focusin", captureFocus, true);
+  document.addEventListener("focusout", captureBlur, true);
+  document.addEventListener("mouseover", captureHover, true);
+  document.addEventListener("scroll", captureScroll, true);
+  document.addEventListener("submit", captureSubmit, true);
+  document.addEventListener("dragstart", captureDragStart, true);
+  document.addEventListener("drop", captureDrop, true);
+  window.addEventListener("resize", captureResize, true);
 })();

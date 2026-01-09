@@ -13,6 +13,7 @@ let lastToolCall = null;
 let toolCallSequence = 0;
 const activeChatRequests = new Map();
 const recorderSessions = new Map();
+const recorderLastUrls = new Map();
 
 chrome.runtime.onInstalled.addListener(async () => {
   // Side panel will be opened manually via chrome.action.onClicked
@@ -32,6 +33,53 @@ chrome.action.onClicked.addListener(async (tab) => {
   chrome.sidePanel.open({ tabId: tab.id });
   // Then handle group creation
   await ensureMcpGroup(tab);
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  const session = recorderSessions.get(tabId);
+  if (session?.isRecording) {
+    const newUrl = changeInfo.url;
+    if (newUrl) {
+      recorderLastUrls.set(tabId, newUrl);
+      session.steps.push({
+        type: "navigate",
+        url: newUrl,
+        title: tab?.title || "",
+        timestamp: Date.now()
+      });
+      void saveRecorderSession(tabId, session);
+    } else if (changeInfo.status === "loading") {
+      const lastUrl = recorderLastUrls.get(tabId);
+      const currentUrl = tab?.url || lastUrl;
+      if (lastUrl && currentUrl && lastUrl === currentUrl) {
+        session.steps.push({
+          type: "reload",
+          url: currentUrl,
+          title: tab?.title || "",
+          timestamp: Date.now()
+        });
+        void saveRecorderSession(tabId, session);
+      }
+    }
+  }
+
+  if (changeInfo.status !== "complete") {
+    return;
+  }
+  if (!session || !session.isRecording) {
+    return;
+  }
+  void (async () => {
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        files: ["recorder-content.js"]
+      });
+      await chrome.tabs.sendMessage(tabId, { type: "RECORDER_SET_ACTIVE", active: true, paused: false });
+    } catch {
+      // ignore injection failures (e.g., non-scriptable URLs)
+    }
+  })();
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -78,7 +126,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message?.type === "RECORDER_PLAY") {
-    playRecording(message.tabId)
+    playRecording(message.tabId, message.speed)
       .then((result) => sendResponse({ ok: true, result }))
       .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
     return true;
@@ -172,6 +220,10 @@ async function startRecording(tabId) {
   const session = { steps: [], isRecording: true };
   recorderSessions.set(targetTabId, session);
   await saveRecorderSession(targetTabId, session);
+  const tab = await chrome.tabs.get(targetTabId).catch(() => null);
+  if (tab?.url) {
+    recorderLastUrls.set(targetTabId, tab.url);
+  }
   try {
     await chrome.tabs.sendMessage(targetTabId, { type: "RECORDER_SET_ACTIVE", active: true, paused: false });
   } catch (error) {
@@ -194,6 +246,7 @@ async function stopRecording(tabId) {
     session.isRecording = false;
     await saveRecorderSession(targetTabId, session);
   }
+  recorderLastUrls.delete(targetTabId);
   await chrome.tabs.sendMessage(targetTabId, { type: "RECORDER_SET_ACTIVE", active: false, paused: false });
   return { tabId: targetTabId };
 }
@@ -206,6 +259,7 @@ async function clearRecording(tabId) {
   const session = { steps: [], isRecording: false };
   recorderSessions.set(targetTabId, session);
   await saveRecorderSession(targetTabId, session);
+  recorderLastUrls.delete(targetTabId);
 }
 
 async function getRecordingResolved(tabId) {
@@ -262,20 +316,47 @@ async function handleRecorderEvent(tabId, step) {
   await saveRecorderSession(tabId, session);
 }
 
-async function playRecording(tabId) {
+async function playRecording(tabId, speed) {
   const targetTabId = await resolveTabId(tabId, null);
   if (!targetTabId) {
     throw new Error("No tab available to play.");
   }
+  const playbackSpeed = clamp(Number(speed) || 1, 0.25, 4);
   const recording = await getRecordingResolved(targetTabId);
-  for (const step of recording.steps) {
-    await executeRecorderStep(targetTabId, step);
-    await new Promise((resolve) => setTimeout(resolve, 300));
+  for (let i = 0; i < recording.steps.length; i += 1) {
+    const step = recording.steps[i];
+    chrome.runtime.sendMessage({ type: "RECORDER_PLAYBACK_STEP", tabId: targetTabId, index: i });
+    await executeRecorderStep(targetTabId, step, playbackSpeed);
+    const delayMs = Math.max(50, 300 / playbackSpeed);
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
+  chrome.runtime.sendMessage({ type: "RECORDER_PLAYBACK_DONE", tabId: targetTabId });
   return { ok: true, steps: recording.steps.length };
 }
 
-async function executeRecorderStep(tabId, step) {
+async function executeRecorderStep(tabId, step, speed) {
+  if (step?.type === "wait") {
+    const duration = Math.max(0, (Number(step.durationMs) || 0) / (Number(speed) || 1));
+    if (duration) {
+      await new Promise((resolve) => setTimeout(resolve, duration));
+    }
+    return { ok: true };
+  }
+  if (step?.type === "navigate") {
+    await chrome.tabs.update(tabId, { url: step.url || "about:blank" });
+    await waitForTabComplete(tabId, 15000);
+    return { ok: true };
+  }
+  if (step?.type === "reload") {
+    await chrome.tabs.reload(tabId);
+    await waitForTabComplete(tabId, 15000);
+    return { ok: true };
+  }
+  if (step?.type === "resize") {
+    const tab = await chrome.tabs.get(tabId);
+    await chrome.windows.update(tab.windowId, { width: step.width, height: step.height });
+    return { ok: true };
+  }
   const [result] = await chrome.scripting.executeScript({
     target: { tabId },
     func: (stepData) => {
@@ -329,11 +410,34 @@ async function executeRecorderStep(tabId, step) {
         findByPierce(selectors.pierce) ||
         findByAria(selectors.aria) ||
         findByText(selectors.text);
+      if (stepData.type === "scroll" && stepData.target === "window") {
+        window.scrollTo(stepData.x || 0, stepData.y || 0);
+        return { ok: true };
+      }
       if (!element) {
         return { ok: false, error: "Element not found." };
       }
       if (stepData.type === "click") {
         element.click();
+        return { ok: true };
+      }
+      if (stepData.type === "double_click") {
+        element.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+        return { ok: true };
+      }
+      if (stepData.type === "triple_click") {
+        for (let i = 0; i < 3; i += 1) {
+          element.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: i + 1 }));
+        }
+        return { ok: true };
+      }
+      if (stepData.type === "right_click") {
+        element.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, button: 2 }));
+        return { ok: true };
+      }
+      if (stepData.type === "hover") {
+        element.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+        element.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
         return { ok: true };
       }
       if (stepData.type === "input") {
@@ -344,11 +448,93 @@ async function executeRecorderStep(tabId, step) {
           return { ok: true };
         }
       }
+      if (stepData.type === "select_change") {
+        if ("value" in element) {
+          element.value = stepData.value;
+          element.dispatchEvent(new Event("change", { bubbles: true }));
+          return { ok: true };
+        }
+      }
+      if (stepData.type === "file_upload") {
+        return { ok: false, error: "File upload steps cannot be replayed automatically." };
+      }
+      if (stepData.type === "keydown") {
+        element.focus?.();
+        const eventInit = {
+          key: stepData.key,
+          code: stepData.code,
+          ctrlKey: Boolean(stepData.ctrlKey),
+          metaKey: Boolean(stepData.metaKey),
+          altKey: Boolean(stepData.altKey),
+          shiftKey: Boolean(stepData.shiftKey),
+          bubbles: true
+        };
+        element.dispatchEvent(new KeyboardEvent("keydown", eventInit));
+        element.dispatchEvent(new KeyboardEvent("keyup", eventInit));
+        return { ok: true };
+      }
+      if (stepData.type === "focus") {
+        element.focus?.();
+        return { ok: true };
+      }
+      if (stepData.type === "blur") {
+        element.blur?.();
+        return { ok: true };
+      }
+      if (stepData.type === "scroll") {
+        element.scrollLeft = stepData.x || 0;
+        element.scrollTop = stepData.y || 0;
+        return { ok: true };
+      }
+      if (stepData.type === "submit") {
+        if (typeof element.submit === "function") {
+          element.submit();
+          return { ok: true };
+        }
+      }
+      if (stepData.type === "drag_drop") {
+        const sourceSelectors = stepData.sourceSelectors || {};
+        const source =
+          findByCss(sourceSelectors.css) ||
+          findByXPath(sourceSelectors.xpath) ||
+          findByPierce(sourceSelectors.pierce) ||
+          findByAria(sourceSelectors.aria) ||
+          findByText(sourceSelectors.text);
+        if (!source) {
+          return { ok: false, error: "Drag source not found." };
+        }
+        const dataTransfer = new DataTransfer();
+        source.dispatchEvent(new DragEvent("dragstart", { bubbles: true, dataTransfer }));
+        element.dispatchEvent(new DragEvent("dragover", { bubbles: true, dataTransfer }));
+        element.dispatchEvent(new DragEvent("drop", { bubbles: true, dataTransfer }));
+        source.dispatchEvent(new DragEvent("dragend", { bubbles: true, dataTransfer }));
+        return { ok: true };
+      }
       return { ok: false, error: "Unsupported step type." };
     },
     args: [step]
   });
   return result?.result;
+}
+
+function waitForTabComplete(tabId, timeoutMs) {
+  return new Promise((resolve) => {
+    let timeout = null;
+    const listener = (updatedTabId, info) => {
+      if (updatedTabId === tabId && info.status === "complete") {
+        cleanup();
+      }
+    };
+    const cleanup = () => {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve();
+    };
+    chrome.tabs.onUpdated.addListener(listener);
+    timeout = setTimeout(cleanup, timeoutMs);
+  });
 }
 
 async function enrichStepWithCdp(tabId, step) {
@@ -470,11 +656,12 @@ async function handleChatRequest(message) {
     activeChatRequests.set(requestId, { controller });
   }
 
-  let tools = buildTools();
+  const localTools = buildTools();
+  let tools = localTools;
   try {
     const remoteTools = await mcpRequest("tools/list", {});
     if (remoteTools?.tools?.length) {
-      tools = remoteTools.tools.map((toolDef) => ({
+      const remoteMapped = remoteTools.tools.map((toolDef) => ({
         type: "function",
         function: {
           name: toolDef.name,
@@ -482,6 +669,14 @@ async function handleChatRequest(message) {
           parameters: toolDef.inputSchema || { type: "object", properties: {} }
         }
       }));
+      const toolByName = new Map();
+      for (const tool of localTools) {
+        toolByName.set(tool.function.name, tool);
+      }
+      for (const tool of remoteMapped) {
+        toolByName.set(tool.function.name, tool);
+      }
+      tools = Array.from(toolByName.values());
     }
   } catch (error) {
     // Fallback to local tool registry if native host is unavailable.
@@ -646,6 +841,10 @@ function buildTools() {
       clear: { type: "boolean" },
       limit: { type: "number" }
     }, ["tabId"]),
+    tool("user_context", "Get the user's local date/time, timezone, and (if permitted) location.", {
+      tabId: { type: "number", description: "Optional tab id used to request geolocation permission." },
+      timeoutMs: { type: "number", description: "Optional timeout for geolocation in milliseconds." }
+    }, []),
     tool("resize_window", "Resize the current browser window to specified dimensions.", {
       width: { type: "number" },
       height: { type: "number" },
@@ -703,6 +902,8 @@ async function executeToolLocal(name, args, fallbackTabId) {
       return toolReadConsole(args);
     case "read_network_requests":
       return toolReadNetwork(args);
+    case "user_context":
+      return toolUserContext(args, fallbackTabId);
     case "resize_window":
       return toolResizeWindow(args);
     case "javascript_tool":
@@ -1131,12 +1332,95 @@ async function toolReadNetwork(args) {
   return { ok: true, requests: output };
 }
 
+async function toolUserContext(args, fallbackTabId) {
+  const now = new Date();
+  const locale = Intl.DateTimeFormat().resolvedOptions().locale || "en-US";
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const offsetMinutes = -now.getTimezoneOffset();
+  const dateTimeIso = now.toISOString();
+  const dateTimeLocal = now.toString();
+  const timeoutMs = clamp(args?.timeoutMs || 5000, 1000, 20000);
+  const tabId = await resolveTabId(args?.tabId, fallbackTabId);
+
+  let location = { ok: false, source: "none", error: "Location unavailable." };
+  if (tabId) {
+    location = await getGeolocationFromTab(tabId, timeoutMs);
+  }
+  if (!location?.ok) {
+    location = {
+      ok: false,
+      source: "timezone",
+      error: location?.error || "Location unavailable without permission.",
+      timeZone
+    };
+  }
+
+  return {
+    ok: true,
+    dateTimeIso,
+    dateTimeLocal,
+    timeZone,
+    locale,
+    offsetMinutes,
+    location
+  };
+}
+
 async function toolResizeWindow(args) {
   const tabId = args.tabId;
   const tab = await chrome.tabs.get(tabId);
   const windowId = tab.windowId;
   await chrome.windows.update(windowId, { width: args.width, height: args.height });
   return { ok: true };
+}
+
+async function getGeolocationFromTab(tabId, timeoutMs) {
+  try {
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (timeoutValue) =>
+        new Promise((resolve) => {
+          if (!("geolocation" in navigator)) {
+            resolve({ ok: false, error: "Geolocation not supported." });
+            return;
+          }
+          let settled = false;
+          const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            resolve({ ok: false, error: "Geolocation timed out." });
+          }, timeoutValue);
+          navigator.geolocation.getCurrentPosition(
+            (pos) => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              resolve({
+                ok: true,
+                source: "geolocation",
+                latitude: pos.coords.latitude,
+                longitude: pos.coords.longitude,
+                accuracy: pos.coords.accuracy,
+                altitude: pos.coords.altitude,
+                heading: pos.coords.heading,
+                speed: pos.coords.speed
+              });
+            },
+            (err) => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              resolve({ ok: false, error: err.message || "Geolocation error.", code: err.code });
+            },
+            { enableHighAccuracy: false, maximumAge: 60000, timeout: timeoutValue }
+          );
+        }),
+      args: [timeoutMs]
+    });
+    return result?.result || { ok: false, error: "Geolocation failed." };
+  } catch (error) {
+    return { ok: false, error: error.message || String(error) };
+  }
 }
 
 async function toolJavascript(args, fallbackTabId) {

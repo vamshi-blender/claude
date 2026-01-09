@@ -93,7 +93,7 @@ body {
   border-radius: 10px;
   font-size: 14px;
   line-height: 1.4;
-  white-space: pre-wrap;
+  word-wrap: break-word;
 }
 
 .message.user {
@@ -102,10 +102,166 @@ body {
   border: 1px solid #c9dcff;
 }
 
+/* Markdown styles for user messages */
+.message.user p {
+  margin: 0 0 0.75em 0;
+}
+
+.message.user p:last-child {
+  margin-bottom: 0;
+}
+
+.message.user code {
+  background: #d4e4ff;
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  font-family: "Consolas", "Monaco", monospace;
+  font-size: 0.9em;
+}
+
+.message.user pre {
+  background: #1d1d1b;
+  color: #f7f7f5;
+  padding: 12px;
+  border-radius: 6px;
+  overflow-x: auto;
+  margin: 0.75em 0;
+}
+
+.message.user pre code {
+  background: none;
+  padding: 0;
+  color: inherit;
+  font-size: 0.85em;
+}
+
+.message.user ul,
+.message.user ol {
+  margin: 0.5em 0;
+  padding-left: 1.5em;
+}
+
+.message.user li {
+  margin: 0.25em 0;
+}
+
+.message.user a {
+  color: #1d4ed8;
+  text-decoration: none;
+}
+
+.message.user a:hover {
+  text-decoration: underline;
+}
+
 .message.assistant {
   align-self: flex-start;
   background: #fff;
   border: 1px solid #e2e0da;
+}
+
+/* Markdown styles for assistant messages */
+.message.assistant p {
+  margin: 0 0 0.75em 0;
+}
+
+.message.assistant p:last-child {
+  margin-bottom: 0;
+}
+
+.message.assistant h1,
+.message.assistant h2,
+.message.assistant h3,
+.message.assistant h4,
+.message.assistant h5,
+.message.assistant h6 {
+  margin: 0.75em 0 0.5em 0;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.message.assistant h1:first-child,
+.message.assistant h2:first-child,
+.message.assistant h3:first-child {
+  margin-top: 0;
+}
+
+.message.assistant h1 { font-size: 1.4em; }
+.message.assistant h2 { font-size: 1.25em; }
+.message.assistant h3 { font-size: 1.1em; }
+
+.message.assistant ul,
+.message.assistant ol {
+  margin: 0.5em 0;
+  padding-left: 1.5em;
+}
+
+.message.assistant li {
+  margin: 0.25em 0;
+}
+
+.message.assistant code {
+  background: #f4f4f2;
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  font-family: "Consolas", "Monaco", monospace;
+  font-size: 0.9em;
+}
+
+.message.assistant pre {
+  background: #1d1d1b;
+  color: #f7f7f5;
+  padding: 12px;
+  border-radius: 6px;
+  overflow-x: auto;
+  margin: 0.75em 0;
+}
+
+.message.assistant pre code {
+  background: none;
+  padding: 0;
+  color: inherit;
+  font-size: 0.85em;
+}
+
+.message.assistant blockquote {
+  border-left: 3px solid #d6d2c8;
+  margin: 0.75em 0;
+  padding-left: 12px;
+  color: #6d6b66;
+}
+
+.message.assistant a {
+  color: #2563eb;
+  text-decoration: none;
+}
+
+.message.assistant a:hover {
+  text-decoration: underline;
+}
+
+.message.assistant table {
+  border-collapse: collapse;
+  margin: 0.75em 0;
+  width: 100%;
+}
+
+.message.assistant th,
+.message.assistant td {
+  border: 1px solid #e2e0da;
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.message.assistant th {
+  background: #f7f7f5;
+  font-weight: 600;
+}
+
+.message.assistant hr {
+  border: none;
+  border-top: 1px solid #e2e0da;
+  margin: 1em 0;
 }
 
 .composer {
@@ -305,6 +461,28 @@ body {
   margin-bottom: 12px;
 }
 
+.recorder-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: #4a4a46;
+}
+
+.recorder-speed-label {
+  font-weight: 600;
+}
+
+.recorder-speed-select {
+  border: 1px solid #d6d2c8;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+  background: #fff;
+  color: #1d1d1b;
+}
+
 .recorder-status {
   font-size: 13px;
   color: #4a4a46;
@@ -319,4 +497,18 @@ body {
 .recorder-steps ol,
 .recorder-steps-list {
   padding-left: 18px;
+}
+
+.recorder-steps-list {
+  max-height: 240px;
+  overflow-y: auto;
+  margin: 0;
+}
+
+.recorder-steps-list li.recorder-step-active {
+  font-weight: 700;
+  color: #1d1d1b;
+  background: #f0efe9;
+  border-radius: 6px;
+  padding: 4px 6px;
 }
