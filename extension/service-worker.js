@@ -759,14 +759,44 @@ async function handleChatRequest(message) {
           result = await executeToolLocal(toolName, toolArgs, tabId);
         }
         setLastToolResponse(result);
-        messages = [
-          ...messages,
-          {
-            role: "tool",
-            tool_call_id: toolCall.id,
-            content: JSON.stringify(result)
-          }
-        ];
+
+        // Check if result contains an image (screenshot)
+        if (result?.dataUrl && typeof result.dataUrl === "string" && result.dataUrl.startsWith("data:image")) {
+          // Format as vision-compatible message with image
+          // First add the tool result without the large dataUrl
+          const toolResultWithoutImage = { ...result };
+          delete toolResultWithoutImage.dataUrl;
+          messages = [
+            ...messages,
+            {
+              role: "tool",
+              tool_call_id: toolCall.id,
+              content: JSON.stringify(toolResultWithoutImage)
+            },
+            {
+              role: "user",
+              content: [
+                { type: "text", text: "Here is the screenshot you just captured:" },
+                {
+                  type: "image_url",
+                  image_url: {
+                    url: result.dataUrl,
+                    detail: "auto"
+                  }
+                }
+              ]
+            }
+          ];
+        } else {
+          messages = [
+            ...messages,
+            {
+              role: "tool",
+              tool_call_id: toolCall.id,
+              content: JSON.stringify(result)
+            }
+          ];
+        }
       }
     }
 
