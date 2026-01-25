@@ -1,88 +1,113 @@
-<!doctype html>
-<html>
+<!DOCTYPE html>
+<html lang="en">
   <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Prompt Navigator</title>
-    <link rel="stylesheet" href="style.css" />
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Browser Assistant</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script src="marked.min.js"></script>
   </head>
   <body>
-    <header class="header">
-      <div class="header-left">
-        <h1>Prompt Navigator</h1>
-        <div class="tabs">
-          <button id="tab-chat" class="tab-button active">Chat</button>
-          <button id="tab-recorder" class="tab-button">Recorder</button>
+    <div class="container" id="appRoot">
+      <div class="background-blur blur-purple"></div>
+      <div class="background-blur blur-cyan"></div>
+      <div class="background-blur blur-pink"></div>
+
+      <div class="content" id="chatView">
+        <div class="header">
+          <div class="header-text">
+            <h1 class="title">Browser Asst.</h1>
+            <p class="subtitle">AI Companion</p>
+          </div>
+          <div class="header-actions">
+            <button id="clear-chat" class="settings-btn add-btn" aria-label="New chat">
+              <img src="assets/plus.svg" alt="" class="settings-icon">
+            </button>
+            <button id="open-options" class="settings-btn" aria-label="Settings">
+              <img src="assets/settings.svg" alt="" class="settings-icon">
+            </button>
+          </div>
+        </div>
+
+        <div class="main-hero" id="emptyState">
+          <div class="ai-character">
+            <div class="bot-shadow" aria-hidden="true"></div>
+            <img src="assets/ai-assistant.png" alt="AI Assistant" class="ai-image">
+          </div>
+          <h2 class="main-heading">How can I help you browse?</h2>
+          <p class="description">
+            Your smart sidekick for navigate websites & complete tasks
+          </p>
+        </div>
+
+        <div class="messages-area" id="messagesArea">
+          <div class="messages-container" id="messagesContainer"></div>
+        </div>
+
+        <div class="input-area" id="inputArea">
+          <div class="textarea-wrapper" id="textareaWrapper" style="display: none;">
+            <div class="textarea-container">
+              <textarea id="messageTextarea" class="message-textarea"></textarea>
+            </div>
+          </div>
+
+          <div class="input-row" id="inputRow">
+            <button class="mic-btn" id="micButton" aria-pressed="false">
+              <img src="assets/Mic.svg" alt="Mic" class="mic-icon">
+            </button>
+            <span class="mic-status" id="micStatus" aria-live="polite"></span>
+            <div class="input-wrapper">
+              <input type="text" placeholder="Write your message..." class="message-input" id="messageInput" autocomplete="off">
+              <button class="train-btn" id="open-recorder" type="button">
+                <img src="assets/train.svg" alt="" class="train-icon">
+                <span>Train</span>
+              </button>
+            </div>
+            <button class="send-btn" id="sendButton">
+              <img src="assets/send.svg" alt="Send" class="send-icon">
+            </button>
+          </div>
         </div>
       </div>
-      <div class="header-actions">
-        <button id="clear-chat" class="link-button">Clear</button>
-        <button id="open-options" class="link-button">Settings</button>
-      </div>
-    </header>
-    <main id="chat-view" class="chat">
-      <div id="messages" class="messages"></div>
-    </main>
-    <section id="tool-debug" class="tool-debug">
-      <div class="tool-debug-header" id="tool-debug-toggle">
-        <span>Tool Calls</span>
-        <span class="tool-debug-arrow">▼</span>
-      </div>
-      <div id="tool-debug-content" class="tool-debug-content collapsed">
-        <div id="tool-calls-list" class="tool-calls-list"></div>
-      </div>
-    </section>
-    <section id="recorder-view" class="recorder hidden">
-      <div id="recorder-login" class="recorder-card hidden">
-        <h2>Recorder Login</h2>
-        <label class="field">
-          <span>Email</span>
-          <input id="recorder-email" type="email" placeholder="you@example.com" />
-        </label>
-        <label class="field">
-          <span>Password</span>
-          <input id="recorder-password" type="password" placeholder="••••••••" />
-        </label>
-        <button id="recorder-login-btn" class="primary">Sign in</button>
-      </div>
-      <div id="recorder-panel" class="recorder-card hidden">
-        <div class="recorder-actions">
-          <button id="record-start" class="primary">Start Recording</button>
-          <button id="record-stop" class="secondary">Stop</button>
-          <button id="record-play" class="secondary">Play</button>
-          <button id="record-clear" class="secondary">Clear</button>
+
+      <section id="recorder-view" class="recorder hidden">
+        <div class="recorder-header">
+          <div class="recorder-title">Training Recorder</div>
+          <div class="recorder-header-actions">
+            <button id="recorder-close" class="recorder-link">Back</button>
+          </div>
         </div>
-        <div class="recorder-controls">
-          <label class="recorder-speed-label" for="playback-speed">Playback speed</label>
-          <select id="playback-speed" class="recorder-speed-select">
-            <option value="0.5">0.5x</option>
-            <option value="0.75">0.75x</option>
-            <option value="1" selected>1x</option>
-            <option value="1.25">1.25x</option>
-            <option value="1.5">1.5x</option>
-            <option value="2">2x</option>
-            <option value="3">3x</option>
-            <option value="4">4x</option>
-          </select>
+        <div id="recorder-panel" class="recorder-card">
+          <div class="recorder-actions">
+            <button id="record-start" class="primary">Start Recording</button>
+            <button id="record-stop" class="secondary">Stop</button>
+            <button id="record-play" class="secondary">Play</button>
+            <button id="record-clear" class="secondary">Clear</button>
+          </div>
+          <div class="recorder-controls">
+            <label class="recorder-speed-label" for="playback-speed">Playback speed</label>
+            <select id="playback-speed" class="recorder-speed-select">
+              <option value="0.5">0.5x</option>
+              <option value="0.75">0.75x</option>
+              <option value="1" selected>1x</option>
+              <option value="1.25">1.25x</option>
+              <option value="1.5">1.5x</option>
+              <option value="2">2x</option>
+              <option value="3">3x</option>
+              <option value="4">4x</option>
+            </select>
+          </div>
+          <div class="recorder-status" id="recorder-status">Idle</div>
+          <div class="recorder-steps">
+            <div class="recorder-steps-header">Recorded Steps</div>
+            <ol id="recorder-steps-list" class="recorder-steps-list"></ol>
+          </div>
         </div>
-        <div class="recorder-status" id="recorder-status">Idle</div>
-        <div class="recorder-steps">
-          <div class="recorder-steps-header">Recorded Steps</div>
-          <ol id="recorder-steps-list" class="recorder-steps-list"></ol>
-        </div>
-      </div>
-    </section>
-    <footer class="composer">
-      <textarea id="prompt" rows="3" placeholder="Enter a prompt..."></textarea>
-      <div class="composer-actions">
-        <div class="composer-buttons">
-          <button id="send" class="primary">Send</button>
-          <button id="continue" class="secondary hidden">Continue</button>
-        </div>
-        <span id="status" class="status"></span>
-      </div>
-    </footer>
+      </section>
+    </div>
     <script src="sidepanel.js"></script>
   </body>
 </html>

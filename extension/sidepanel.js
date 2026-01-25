@@ -1,23 +1,23 @@
-const messagesEl = document.getElementById("messages");
-const promptEl = document.getElementById("prompt");
-const sendEl = document.getElementById("send");
-const statusEl = document.getElementById("status");
-const optionsEl = document.getElementById("open-options");
-const clearEl = document.getElementById("clear-chat");
-const continueEl = document.getElementById("continue");
-const tabChatEl = document.getElementById("tab-chat");
-const tabRecorderEl = document.getElementById("tab-recorder");
-const chatViewEl = document.getElementById("chat-view");
-const recorderViewEl = document.getElementById("recorder-view");
-const toolDebugEl = document.getElementById("tool-debug");
-const toolDebugToggle = document.getElementById("tool-debug-toggle");
-const toolDebugContent = document.getElementById("tool-debug-content");
-const toolCallsList = document.getElementById("tool-calls-list");
-const recorderLoginEl = document.getElementById("recorder-login");
-const recorderPanelEl = document.getElementById("recorder-panel");
-const recorderEmailEl = document.getElementById("recorder-email");
-const recorderPasswordEl = document.getElementById("recorder-password");
-const recorderLoginBtn = document.getElementById("recorder-login-btn");
+const messagesContainer = document.getElementById("messagesContainer");
+const messageInput = document.getElementById("messageInput");
+const messageTextarea = document.getElementById("messageTextarea");
+const textareaWrapper = document.getElementById("textareaWrapper");
+const inputArea = document.getElementById("inputArea");
+const emptyState = document.getElementById("emptyState");
+const messagesArea = document.getElementById("messagesArea");
+const sendButton = document.getElementById("sendButton");
+const clearButton = document.getElementById("clear-chat");
+const openOptionsButton = document.getElementById("open-options");
+const openRecorderButton = document.getElementById("open-recorder");
+const recorderView = document.getElementById("recorder-view");
+const chatView = document.getElementById("chatView");
+const recorderCloseButton = document.getElementById("recorder-close");
+const micButton = document.getElementById("micButton");
+const micIcon = document.querySelector(".mic-icon");
+const micStatus = document.getElementById("micStatus");
+const aiImage = document.querySelector(".ai-image");
+const botShadow = document.querySelector(".bot-shadow");
+
 const recordStartEl = document.getElementById("record-start");
 const recordStopEl = document.getElementById("record-stop");
 const recordPlayEl = document.getElementById("record-play");
@@ -28,92 +28,320 @@ const recorderStepsListEl = document.getElementById("recorder-steps-list");
 
 let isBusy = false;
 let currentRequestId = null;
-let recorderPollTimer = null;
-let toolCalls = [];
-let lastToolCall = null;
+let history = [];
 const streamingMessages = new Map();
+const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+let recorderPollTimer = null;
 let recorderAutoScroll = true;
 let currentPlaybackIndex = null;
+let chatAutoScroll = true;
+let toolPollTimer = null;
+let lastToolSnapshot = null;
+const toolCallGroups = new Map();
+const toolCallItems = new Map();
+let lastActiveRequestId = null;
 
 const tabParam = new URLSearchParams(window.location.search).get("tabId");
 const parsedTabId = tabParam ? Number(tabParam) : null;
 const tabId = Number.isFinite(parsedTabId) ? parsedTabId : null;
 const historyKey = tabId ? `history_tab_${tabId}` : "history_tab_default";
 
-let history = [];
+const assetUrl = (path) => {
+  if (window.chrome && chrome.runtime && typeof chrome.runtime.getURL === "function") {
+    return chrome.runtime.getURL(path);
+  }
+  return path;
+};
 
-optionsEl.addEventListener("click", () => chrome.runtime.openOptionsPage());
-clearEl.addEventListener("click", () => clearChat());
-sendEl.addEventListener("click", () => {
-  if (isBusy) {
-    handlePause();
+const micIdleSrc = micIcon ? micIcon.getAttribute("src") || "assets/Mic.svg" : "";
+const micRecordingSrc = "assets/Mic-recording.svg";
+const defaultPlaceholder = messageInput ? messageInput.getAttribute("placeholder") || "" : "";
+const listeningPlaceholder = "Listening...";
+const micOnAudio = new Audio(assetUrl("assets/audio/MicON.mp3"));
+const micOffAudio = new Audio(assetUrl("assets/audio/MicOFF.mp3"));
+micOnAudio.preload = "auto";
+micOffAudio.preload = "auto";
+if (micIcon) {
+  micIcon.setAttribute("src", assetUrl(micIdleSrc));
+}
+
+let isExpanded = false;
+let isRecording = false;
+let isChatActive = false;
+
+function activateChatMode() {
+  if (isChatActive) return;
+  isChatActive = true;
+  emptyState.classList.add("hidden");
+  messagesArea.classList.add("active");
+}
+
+function resetChat() {
+  history = [];
+  streamingMessages.clear();
+  messagesContainer.innerHTML = "";
+  toolCallGroups.clear();
+  toolCallItems.clear();
+  lastToolSnapshot = null;
+  isChatActive = false;
+  emptyState.classList.remove("hidden");
+  messagesArea.classList.remove("active");
+  saveHistory().catch(() => {});
+  chrome.runtime.sendMessage({ type: "RESET_TOOL_CALLS" }).catch(() => {});
+}
+
+function renderMarkdown(text) {
+  if (typeof marked !== "undefined") {
+    marked.setOptions({ breaks: true, gfm: true });
+    return marked.parse(text || "");
+  }
+  return escapeHtml(text || "");
+}
+
+function escapeHtml(text) {
+  const div = document.createElement("div");
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function renderMessage(message) {
+  const messageDiv = document.createElement("div");
+  messageDiv.classList.add("message", message.role === "assistant" ? "bot" : "user");
+
+  const bubbleDiv = document.createElement("div");
+  bubbleDiv.classList.add("message-bubble");
+
+  const textDiv = document.createElement("div");
+  textDiv.classList.add("message-text", "selectable");
+  textDiv.innerHTML = renderMarkdown(message.content);
+
+  bubbleDiv.appendChild(textDiv);
+  messageDiv.appendChild(bubbleDiv);
+  messagesContainer.appendChild(messageDiv);
+  chatAutoScroll = true;
+  scrollMessagesToBottom();
+
+  return { messageDiv, textDiv };
+}
+
+function addMessage(message) {
+  if (!message.content.trim()) return;
+  if (!isChatActive) {
+    activateChatMode();
+  }
+  history.push(message);
+  saveHistory().catch(() => {});
+  renderMessage(message);
+}
+
+function ensureStreamMessage(requestId) {
+  if (!requestId) return null;
+  const existing = streamingMessages.get(requestId);
+  if (existing) return existing;
+
+  const message = { role: "assistant", content: "" };
+  history.push(message);
+  const { textDiv } = renderMessage(message);
+  const entry = { index: history.length - 1, textDiv, content: "" };
+  streamingMessages.set(requestId, entry);
+  return entry;
+}
+
+function handleStreamChunk(requestId, delta) {
+  if (!delta) return;
+  const entry = ensureStreamMessage(requestId);
+  if (!entry) return;
+  entry.content += delta;
+  entry.textDiv.innerHTML = renderMarkdown(entry.content);
+  scrollMessagesToBottom();
+}
+
+function updateStreamMessage(requestId, content, finalize) {
+  const entry = ensureStreamMessage(requestId);
+  if (!entry) return;
+  entry.content = content;
+  entry.textDiv.innerHTML = renderMarkdown(content);
+  scrollMessagesToBottom();
+  if (finalize) {
+    history[entry.index].content = content;
+    saveHistory().catch(() => {});
+    streamingMessages.delete(requestId);
+  }
+}
+
+function finalizeStream(requestId) {
+  const entry = streamingMessages.get(requestId);
+  if (!entry) return;
+  entry.done = true;
+}
+
+function getToolGroup(requestId) {
+  if (!requestId) {
+    return null;
+  }
+  const existing = toolCallGroups.get(requestId);
+  if (existing) {
+    return existing;
+  }
+
+  const container = document.createElement("div");
+  container.className = "tool-calls";
+
+  const header = document.createElement("button");
+  header.className = "tool-calls-header";
+  header.type = "button";
+  header.setAttribute("aria-expanded", "false");
+  header.innerHTML = `<span>Tool calls (<span class="tool-calls-count">0</span>)</span><span class="tool-calls-chevron">▾</span>`;
+
+  const content = document.createElement("div");
+  content.className = "tool-calls-content collapsed";
+
+  const list = document.createElement("div");
+  list.className = "tool-calls-list";
+  content.appendChild(list);
+
+  header.addEventListener("click", () => {
+    const isCollapsed = content.classList.contains("collapsed");
+    content.classList.toggle("collapsed", !isCollapsed);
+    header.setAttribute("aria-expanded", String(isCollapsed));
+  });
+
+  container.appendChild(header);
+  container.appendChild(content);
+  messagesContainer.appendChild(container);
+  scrollMessagesToBottom();
+
+  const group = {
+    requestId,
+    container,
+    header,
+    countEl: header.querySelector(".tool-calls-count"),
+    list,
+    content,
+    count: 0
+  };
+
+  toolCallGroups.set(requestId, group);
+  return group;
+}
+
+function addToolCallToGroup(requestId, call) {
+  if (!requestId) {
     return;
   }
-  handleSend();
-});
-continueEl.addEventListener("click", () => handleContinue());
-tabChatEl.addEventListener("click", () => switchTab("chat"));
-tabRecorderEl.addEventListener("click", () => switchTab("recorder"));
-toolDebugToggle.addEventListener("click", () => toggleToolDebug());
-recorderLoginBtn.addEventListener("click", () => handleRecorderLogin());
-recordStartEl.addEventListener("click", () => handleRecorderStart());
-recordStopEl.addEventListener("click", () => handleRecorderStop());
-recordPlayEl.addEventListener("click", () => handleRecorderPlay());
-recordClearEl.addEventListener("click", () => handleRecorderClear());
-playbackSpeedEl.addEventListener("change", () => handlePlaybackSpeedChange());
-recorderStepsListEl.addEventListener("scroll", () => handleRecorderScroll());
-promptEl.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.shiftKey) {
-    event.preventDefault();
-    if (isBusy) {
-      handlePause();
-      return;
-    }
-    handleSend();
+  const group = getToolGroup(requestId);
+  if (!group) {
+    return;
   }
-});
 
-loadHistory().then(renderHistory).catch(() => {});
-setInterval(updateLastTool, 1000);
-initRecorderView();
+  const item = document.createElement("div");
+  item.className = "tool-call-item";
+  const title = document.createElement("div");
+  title.className = "tool-call-title";
+  title.textContent = call.name || "Tool";
+  item.appendChild(title);
 
-chrome.runtime.onMessage.addListener((message) => {
-  if (message?.type === "CHAT_STREAM") {
-    handleStreamChunk(message.requestId, message.delta);
+  const argsBlock = document.createElement("pre");
+  argsBlock.className = "tool-call-block";
+  argsBlock.textContent = JSON.stringify(call.args, null, 2);
+  item.appendChild(argsBlock);
+
+  const responseBlock = document.createElement("pre");
+  responseBlock.className = "tool-call-block is-pending";
+  responseBlock.textContent = "Waiting...";
+  item.appendChild(responseBlock);
+
+  group.list.appendChild(item);
+  group.count += 1;
+  group.countEl.textContent = String(group.count);
+
+  toolCallItems.set(call.sequence, { responseBlock, group });
+  scrollMessagesToBottom();
+}
+
+function updateToolCallResponse(sequence, response) {
+  const entry = toolCallItems.get(sequence);
+  if (!entry) {
+    return;
   }
-  if (message?.type === "CHAT_STREAM_DONE") {
-    finalizeStream(message.requestId);
-  }
-  if (message?.type === "RECORDER_PLAYBACK_STEP") {
-    if (tabId && message.tabId && tabId !== message.tabId) {
+  entry.responseBlock.classList.remove("is-pending");
+  entry.responseBlock.textContent = JSON.stringify(response, null, 2);
+  scrollMessagesToBottom();
+}
+
+async function pollToolCalls() {
+  try {
+    const response = await chrome.runtime.sendMessage({ type: "GET_LAST_TOOL" });
+    if (!response?.ok) {
       return;
     }
-    currentPlaybackIndex = message.index;
-    applyPlaybackHighlight();
-  }
-  if (message?.type === "RECORDER_PLAYBACK_DONE") {
-    if (tabId && message.tabId && tabId !== message.tabId) {
+    const tool = response.tool;
+    if (!tool) {
       return;
     }
-    currentPlaybackIndex = null;
-    applyPlaybackHighlight();
+
+    if (!lastToolSnapshot || tool.sequence !== lastToolSnapshot.sequence) {
+      const requestId = currentRequestId || lastActiveRequestId || lastToolSnapshot?.requestId || "idle";
+      addToolCallToGroup(requestId, tool);
+      lastToolSnapshot = { ...tool, requestId };
+      if (tool.response !== undefined) {
+        updateToolCallResponse(tool.sequence, tool.response);
+      }
+      return;
+    }
+
+    if (
+      tool.response !== undefined &&
+      lastToolSnapshot.response === undefined &&
+      tool.sequence === lastToolSnapshot.sequence
+    ) {
+      updateToolCallResponse(tool.sequence, tool.response);
+      lastToolSnapshot = { ...tool, requestId: lastToolSnapshot.requestId };
+    }
+  } catch {
+    // ignore polling errors
   }
-});
+}
+
+function startToolPolling() {
+  if (toolPollTimer) {
+    return;
+  }
+  toolPollTimer = setInterval(() => {
+    if (!recorderView.classList.contains("hidden")) {
+      return;
+    }
+    pollToolCalls().catch(() => {});
+  }, 1000);
+}
+
+function isMessagesNearBottom() {
+  const { scrollTop, clientHeight, scrollHeight } = messagesContainer;
+  return scrollTop + clientHeight >= scrollHeight - 8;
+}
+
+function scrollMessagesToBottom() {
+  if (!chatAutoScroll) return;
+  messagesContainer.scrollTop = messagesContainer.scrollHeight;
+}
 
 async function handleSend() {
-  if (isBusy) {
-    return;
-  }
-  const text = promptEl.value.trim();
-  if (!text) {
-    return;
-  }
-  promptEl.value = "";
+  if (isBusy) return;
+  const text = isExpanded ? messageTextarea.value.trim() : messageInput.value.trim();
+  if (!text) return;
+
   addMessage({ role: "user", content: text });
-  setStatus("Thinking...");
+  messageInput.value = "";
+  messageTextarea.value = "";
+
+  if (isExpanded) {
+    collapseToInput();
+  }
+
   isBusy = true;
+  sendButton.disabled = true;
   currentRequestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  sendEl.textContent = "Pause";
+  lastActiveRequestId = currentRequestId;
 
   try {
     const response = await chrome.runtime.sendMessage({
@@ -133,177 +361,235 @@ async function handleSend() {
     } else {
       addMessage({ role: "assistant", content: assistantMessage });
     }
-    setStatus("");
-    if (response.result?.paused) {
-      showContinue(true);
-    }
   } catch (error) {
+    const errorMessage = `Error: ${error.message}`;
     if (currentRequestId && streamingMessages.has(currentRequestId)) {
-      updateStreamMessage(currentRequestId, `Error: ${error.message}`, true);
+      updateStreamMessage(currentRequestId, errorMessage, true);
     } else {
-      addMessage({ role: "assistant", content: `Error: ${error.message}` });
+      addMessage({ role: "assistant", content: errorMessage });
     }
-    setStatus("Failed");
   } finally {
     isBusy = false;
+    lastActiveRequestId = currentRequestId || lastActiveRequestId;
     currentRequestId = null;
-    sendEl.textContent = "Send";
+    sendButton.disabled = false;
   }
 }
 
-function addMessage(message) {
-  history.push(message);
-  saveHistory().catch(() => {});
-  renderMessage(message);
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+function textExceedsInputWidth(text) {
+  const span = document.createElement("span");
+  const style = window.getComputedStyle(messageInput);
+  span.style.font = style.font;
+  span.style.fontSize = style.fontSize;
+  span.style.visibility = "hidden";
+  span.style.position = "absolute";
+  span.style.whiteSpace = "nowrap";
+  span.textContent = text;
+
+  document.body.appendChild(span);
+  const textWidth = span.offsetWidth;
+  document.body.removeChild(span);
+
+  const inputWidth = messageInput.offsetWidth;
+  return textWidth > inputWidth - 10;
 }
 
-function renderHistory() {
-  messagesEl.innerHTML = "";
-  for (const message of history) {
-    renderMessage(message);
-  }
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+const transitionDuration =
+  parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--transition-duration")) * 1000 || 300;
+
+function expandToTextarea() {
+  if (isExpanded) return;
+  isExpanded = true;
+  messageTextarea.value = messageInput.value;
+  textareaWrapper.style.display = "block";
+
+  requestAnimationFrame(() => {
+    inputArea.classList.add("expanded");
+    textareaWrapper.classList.add("visible");
+    updateMicStatus();
+    messageTextarea.focus();
+    messageTextarea.setSelectionRange(messageTextarea.value.length, messageTextarea.value.length);
+    updateTextareaHeight();
+  });
 }
 
-function renderMessage(message) {
-  const row = document.createElement("div");
-  row.className = `message ${message.role}`;
-  row.innerHTML = renderMarkdown(message.content);
-  messagesEl.appendChild(row);
-  return row;
+function collapseToInput() {
+  if (!isExpanded) return;
+  isExpanded = false;
+  messageInput.value = messageTextarea.value;
+  inputArea.classList.remove("expanded");
+  textareaWrapper.classList.remove("visible");
+  updateMicStatus();
+
+  setTimeout(() => {
+    if (!isExpanded) {
+      textareaWrapper.style.display = "none";
+    }
+  }, transitionDuration);
+
+  messageInput.focus();
 }
 
-function renderMarkdown(text) {
-  if (typeof marked !== "undefined") {
-    marked.setOptions({
-      breaks: true,
-      gfm: true
-    });
-    return marked.parse(text || "");
-  }
-  return escapeHtml(text || "");
+function updateTextareaHeight() {
+  messageTextarea.style.height = "auto";
+  const newHeight = Math.min(Math.max(messageTextarea.scrollHeight, 50), 72);
+  messageTextarea.style.height = `${newHeight}px`;
 }
 
-function escapeHtml(text) {
-  const div = document.createElement("div");
-  div.textContent = text;
-  return div.innerHTML;
-}
-
-function setStatus(text) {
-  statusEl.textContent = text;
-}
-
-function toggleToolDebug() {
-  const isCollapsed = toolDebugContent.classList.contains("collapsed");
-  const arrow = toolDebugToggle.querySelector(".tool-debug-arrow");
-
-  if (isCollapsed) {
-    toolDebugContent.classList.remove("collapsed");
-    arrow.classList.add("expanded");
+function updateMicStatus() {
+  if (!micStatus) return;
+  if (isRecording && isExpanded) {
+    micStatus.textContent = listeningPlaceholder;
+    micStatus.classList.add("is-visible");
   } else {
-    toolDebugContent.classList.add("collapsed");
-    arrow.classList.remove("expanded");
+    micStatus.textContent = "";
+    micStatus.classList.remove("is-visible");
   }
 }
 
-async function updateLastTool() {
-  try {
-    const response = await chrome.runtime.sendMessage({ type: "GET_LAST_TOOL" });
-    if (!response?.ok) {
-      return;
-    }
-    const tool = response.tool;
-    if (!tool) {
-      return;
-    }
+function setRecordingState(nextState) {
+  if (!micButton || !micIcon || !messageInput || !messageTextarea) return;
+  isRecording = nextState;
+  micButton.classList.toggle("is-recording", isRecording);
+  micIcon.setAttribute("src", assetUrl(isRecording ? micRecordingSrc : micIdleSrc));
+  micButton.setAttribute("aria-pressed", isRecording ? "true" : "false");
 
-    // Check if this is a new tool call or an update with response
-    if (!lastToolCall || tool.timestamp !== lastToolCall.timestamp) {
-      // New tool call
-      lastToolCall = tool;
-      toolCalls.push({ ...tool });
-      // Limit to last 50 tool calls
-      if (toolCalls.length > 50) {
-        toolCalls.shift();
-      }
-      renderToolCalls();
-    } else if (tool.response !== undefined && lastToolCall.response === undefined) {
-      // Update with response
-      lastToolCall = tool;
-      const index = toolCalls.findIndex(c => c.timestamp === tool.timestamp);
-      if (index !== -1) {
-        toolCalls[index] = { ...tool };
-        renderToolCalls();
-      }
+  if (isRecording) {
+    if (!isExpanded) {
+      messageInput.setAttribute("placeholder", listeningPlaceholder);
     }
-  } catch {
-    // ignore polling errors
+    messageInput.disabled = true;
+    messageTextarea.disabled = true;
+  } else {
+    messageInput.setAttribute("placeholder", defaultPlaceholder);
+    messageInput.disabled = false;
+    messageTextarea.disabled = false;
+  }
+
+  updateMicStatus();
+}
+
+function playMicSound(isOn) {
+  const audio = isOn ? micOnAudio : micOffAudio;
+  if (!audio) return;
+  audio.currentTime = 0;
+  const playPromise = audio.play();
+  if (playPromise && typeof playPromise.catch === "function") {
+    playPromise.catch(() => {});
   }
 }
 
-function renderToolCalls() {
-  if (toolCalls.length === 0) {
-    toolCallsList.innerHTML = '<div style="padding: 8px; color: #6d6b66;">No tool calls yet</div>';
+function showRecorderView(show) {
+  recorderView.classList.toggle("hidden", !show);
+  chatView.classList.toggle("hidden", show);
+  if (show) {
+    refreshRecorderSteps().catch(() => {});
+  }
+}
+
+function initAiHover() {
+  if (!aiImage) return;
+
+  const updateShadowFromOffset = (offsetY) => {
+    if (!botShadow) return;
+    const baseWidth = 114;
+    const baseHeight = 4;
+    const minScale = 0.55;
+    const maxScale = 1.35;
+    const minHeightScale = 0.5;
+    const maxHeightScale = 1.25;
+    const minBlur = 2;
+    const maxBlur = 9;
+    const maxOffset = 6;
+    const clamp = Math.max(-maxOffset, Math.min(maxOffset, offsetY));
+    const closeness = (clamp + maxOffset) / (2 * maxOffset);
+    const scale = minScale + (maxScale - minScale) * closeness;
+    const heightScale = minHeightScale + (maxHeightScale - minHeightScale) * closeness;
+    const blur = minBlur + (maxBlur - minBlur) * closeness;
+
+    botShadow.style.width = `${(baseWidth * scale).toFixed(1)}px`;
+    botShadow.style.height = `${(baseHeight * heightScale).toFixed(2)}px`;
+    botShadow.style.filter = `blur(${blur.toFixed(2)}px)`;
+  };
+
+  const startHoverLoop = () => {
+    if (aiImage.classList.contains("is-hovering")) return;
+    aiImage.classList.add("is-hovering");
+    if (botShadow) {
+      botShadow.classList.remove("is-animating");
+    }
+
+    const maxY = 6;
+    const maxRot = 10;
+    const durationMin = 1800;
+    const durationMax = 3200;
+    let startY = 0;
+    let startRot = 0;
+    let targetY = 0;
+    let targetRot = 0;
+    let startTime = performance.now();
+    let duration = durationMin;
+
+    const easeInOutSine = (t) => 0.5 - 0.5 * Math.cos(Math.PI * t);
+
+    const pickTarget = () => {
+      startY = targetY;
+      startRot = targetRot;
+      targetY = Math.random() * maxY * 2 - maxY;
+      targetRot = (Math.random() < 0.5 ? -1 : 1) * (Math.random() * maxRot);
+      startTime = performance.now();
+      duration = durationMin + Math.random() * (durationMax - durationMin);
+    };
+
+    const updateHover = (now) => {
+      const elapsed = now - startTime;
+      const t = Math.min(elapsed / duration, 1);
+      const eased = easeInOutSine(t);
+      const hoverY = startY + (targetY - startY) * eased;
+      const hoverRot = startRot + (targetRot - startRot) * eased;
+
+      aiImage.style.setProperty("--hover-y", `${hoverY.toFixed(2)}px`);
+      aiImage.style.setProperty("--hover-rot", `${hoverRot.toFixed(2)}deg`);
+      updateShadowFromOffset(hoverY);
+
+      if (t >= 1) {
+        pickTarget();
+      }
+
+      requestAnimationFrame(updateHover);
+    };
+
+    pickTarget();
+    requestAnimationFrame(updateHover);
+  };
+
+  if (reduceMotion) {
+    aiImage.classList.remove("is-animating");
+    aiImage.classList.add("is-hovering");
+    updateShadowFromOffset(0);
     return;
   }
 
-  toolCallsList.innerHTML = "";
-  // Show oldest first (chronological order)
-  for (let i = 0; i < toolCalls.length; i++) {
-    const call = toolCalls[i];
-    const item = document.createElement("div");
-    item.className = "tool-call-item";
+  aiImage.addEventListener(
+    "animationend",
+    (event) => {
+      if (event.animationName === "bot-rise-spin") {
+        aiImage.classList.remove("is-animating");
+        if (botShadow) {
+          botShadow.classList.remove("is-animating");
+        }
+        startHoverLoop();
+      }
+    },
+    { once: true }
+  );
 
-    const header = document.createElement("div");
-    header.className = "tool-call-header";
-    const sequenceNum = call.sequence || (i + 1);
-    header.textContent = `#${sequenceNum} - ${call.name}`;
-    item.appendChild(header);
-
-    const argsSection = document.createElement("div");
-    argsSection.className = "tool-call-section";
-    const argsLabel = document.createElement("div");
-    argsLabel.className = "tool-call-label";
-    argsLabel.textContent = "Arguments:";
-    argsSection.appendChild(argsLabel);
-    const argsData = document.createElement("div");
-    argsData.className = "tool-call-data";
-    argsData.textContent = JSON.stringify(call.args, null, 2);
-    argsSection.appendChild(argsData);
-    item.appendChild(argsSection);
-
-    if (call.response !== null && call.response !== undefined) {
-      const responseSection = document.createElement("div");
-      responseSection.className = "tool-call-section";
-      const responseLabel = document.createElement("div");
-      responseLabel.className = "tool-call-label";
-      responseLabel.textContent = "Response:";
-      responseSection.appendChild(responseLabel);
-      const responseData = document.createElement("div");
-      responseData.className = "tool-call-data";
-      responseData.textContent = JSON.stringify(call.response, null, 2);
-      responseSection.appendChild(responseData);
-      item.appendChild(responseSection);
-    } else {
-      const loadingSection = document.createElement("div");
-      loadingSection.className = "tool-call-section";
-      const loadingLabel = document.createElement("div");
-      loadingLabel.className = "tool-call-label";
-      loadingLabel.textContent = "Response:";
-      loadingSection.appendChild(loadingLabel);
-      const loadingData = document.createElement("div");
-      loadingData.className = "tool-call-data";
-      loadingData.style.fontStyle = "italic";
-      loadingData.style.color = "#6d6b66";
-      loadingData.textContent = "Waiting...";
-      loadingSection.appendChild(loadingData);
-      item.appendChild(loadingSection);
+  requestAnimationFrame(() => {
+    aiImage.classList.add("is-animating");
+    if (botShadow) {
+      botShadow.classList.add("is-animating");
     }
-
-    toolCallsList.appendChild(item);
-  }
+  });
 }
 
 async function loadHistory() {
@@ -318,180 +604,15 @@ async function saveHistory() {
   await chrome.storage.local.set({ [historyKey]: history });
 }
 
-async function clearChat() {
-  if (isBusy) {
-    await handlePause();
+function renderHistory() {
+  messagesContainer.innerHTML = "";
+  if (history.length > 0) {
+    activateChatMode();
   }
-  history = [];
-  toolCalls = [];
-  lastToolCall = null;
-  streamingMessages.clear();
-  await chrome.runtime.sendMessage({ type: "RESET_TOOL_CALLS" });
-  await chrome.storage.local.remove(historyKey);
-  messagesEl.innerHTML = "";
-  renderToolCalls();
-  setStatus("");
-  showContinue(false);
-}
-
-async function handleContinue() {
-  if (isBusy) {
-    return;
+  for (const message of history) {
+    renderMessage(message);
   }
-  showContinue(false);
-  addMessage({ role: "user", content: "Continue" });
-  setStatus("Thinking...");
-  isBusy = true;
-  currentRequestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  sendEl.textContent = "Pause";
-  try {
-    const response = await chrome.runtime.sendMessage({
-      type: "CHAT_REQUEST",
-      history,
-      tabId,
-      requestId: currentRequestId
-    });
-    if (!response?.ok) {
-      throw new Error(response?.error || "Request failed.");
-    }
-    const assistantMessage = response.result?.assistantMessage || "Done.";
-    if (currentRequestId && streamingMessages.has(currentRequestId)) {
-      updateStreamMessage(currentRequestId, assistantMessage, true);
-    } else {
-      addMessage({ role: "assistant", content: assistantMessage });
-    }
-    setStatus("");
-    if (response.result?.paused) {
-      showContinue(true);
-    }
-  } catch (error) {
-    if (currentRequestId && streamingMessages.has(currentRequestId)) {
-      updateStreamMessage(currentRequestId, `Error: ${error.message}`, true);
-    } else {
-      addMessage({ role: "assistant", content: `Error: ${error.message}` });
-    }
-    setStatus("Failed");
-  } finally {
-    isBusy = false;
-    currentRequestId = null;
-    sendEl.textContent = "Send";
-  }
-}
-
-function showContinue(show) {
-  continueEl.classList.toggle("hidden", !show);
-}
-
-function ensureStreamMessage(requestId) {
-  if (!requestId) {
-    return null;
-  }
-  const existing = streamingMessages.get(requestId);
-  if (existing) {
-    return existing;
-  }
-  const message = { role: "assistant", content: "" };
-  history.push(message);
-  const row = renderMessage(message);
-  messagesEl.scrollTop = messagesEl.scrollHeight;
-  const entry = { index: history.length - 1, row, content: "" };
-  streamingMessages.set(requestId, entry);
-  return entry;
-}
-
-function handleStreamChunk(requestId, delta) {
-  if (!delta) {
-    return;
-  }
-  const entry = ensureStreamMessage(requestId);
-  if (!entry) {
-    return;
-  }
-  entry.content += delta;
-  entry.row.innerHTML = renderMarkdown(entry.content);
-}
-
-function updateStreamMessage(requestId, content, finalize) {
-  const entry = ensureStreamMessage(requestId);
-  if (!entry) {
-    return;
-  }
-  entry.content = content;
-  entry.row.innerHTML = renderMarkdown(content);
-  if (finalize) {
-    history[entry.index].content = content;
-    saveHistory().catch(() => {});
-    streamingMessages.delete(requestId);
-  }
-}
-
-function finalizeStream(requestId) {
-  const entry = streamingMessages.get(requestId);
-  if (!entry) {
-    return;
-  }
-  entry.done = true;
-}
-
-async function handlePause() {
-  if (!isBusy || !currentRequestId) {
-    return;
-  }
-  await chrome.runtime.sendMessage({ type: "CANCEL_REQUEST", requestId: currentRequestId });
-  setStatus("Paused");
-  showContinue(true);
-}
-
-function switchTab(name) {
-  const isChat = name === "chat";
-  tabChatEl.classList.toggle("active", isChat);
-  tabRecorderEl.classList.toggle("active", !isChat);
-  chatViewEl.classList.toggle("hidden", !isChat);
-  toolDebugEl.classList.toggle("hidden", !isChat);
-  recorderViewEl.classList.toggle("hidden", isChat);
-  if (!isChat) {
-    refreshRecorderSteps().catch(() => {});
-  }
-}
-
-async function initRecorderView() {
-  const { recorderLoggedIn, recorderPlaybackSpeed } = await chrome.storage.local.get([
-    "recorderLoggedIn",
-    "recorderPlaybackSpeed"
-  ]);
-  if (recorderLoggedIn) {
-    showRecorderPanel();
-  } else {
-    showRecorderLogin();
-  }
-  if (recorderPlaybackSpeed) {
-    playbackSpeedEl.value = String(recorderPlaybackSpeed);
-  }
-  await refreshRecorderSteps();
-  startRecorderPolling();
-}
-
-function showRecorderLogin() {
-  recorderLoginEl.classList.remove("hidden");
-  recorderPanelEl.classList.add("hidden");
-}
-
-function showRecorderPanel() {
-  recorderLoginEl.classList.add("hidden");
-  recorderPanelEl.classList.remove("hidden");
-}
-
-async function handleRecorderLogin() {
-  const email = recorderEmailEl.value.trim();
-  const password = recorderPasswordEl.value.trim();
-  if (!email || !password) {
-    recorderStatusEl.textContent = "Enter email and password.";
-    return;
-  }
-  await chrome.storage.local.set({ recorderLoggedIn: true, recorderUser: email });
-  recorderStatusEl.textContent = "Signed in.";
-  showRecorderPanel();
-  await refreshRecorderSteps();
+  scrollMessagesToBottom();
 }
 
 async function handleRecorderStart() {
@@ -516,6 +637,7 @@ async function handleRecorderStop() {
 
 async function handleRecorderPlay() {
   recorderStatusEl.textContent = "Playing...";
+  recorderAutoScroll = true;
   const speed = Number(playbackSpeedEl.value) || 1;
   await chrome.storage.local.set({ recorderPlaybackSpeed: speed });
   const response = await chrome.runtime.sendMessage({ type: "RECORDER_PLAY", tabId, speed });
@@ -543,8 +665,8 @@ async function refreshRecorderSteps() {
     return;
   }
   const steps = response.result?.steps || [];
-  const isRecording = Boolean(response.result?.isRecording);
-  setRecorderControls({ isRecording, hasSteps: steps.length > 0 });
+  const isRecordingNow = Boolean(response.result?.isRecording);
+  setRecorderControls({ isRecording: isRecordingNow, hasSteps: steps.length > 0 });
   if (!steps.length) {
     recorderStepsListEl.innerHTML = "<li>No steps recorded.</li>";
     return;
@@ -593,11 +715,11 @@ async function refreshRecorderSteps() {
   }
 }
 
-function setRecorderControls({ isRecording, hasSteps }) {
-  recordStartEl.classList.toggle("hidden", isRecording);
-  recordStopEl.classList.toggle("hidden", !isRecording);
-  recordPlayEl.classList.toggle("hidden", isRecording || !hasSteps);
-  recordClearEl.classList.toggle("hidden", isRecording || !hasSteps);
+function setRecorderControls({ isRecording: isRecordingNow, hasSteps }) {
+  recordStartEl.classList.toggle("hidden", isRecordingNow);
+  recordStopEl.classList.toggle("hidden", !isRecordingNow);
+  recordPlayEl.classList.toggle("hidden", isRecordingNow || !hasSteps);
+  recordClearEl.classList.toggle("hidden", isRecordingNow || !hasSteps);
 }
 
 function handlePlaybackSpeedChange() {
@@ -632,12 +754,135 @@ function applyPlaybackHighlight() {
 }
 
 function startRecorderPolling() {
-  if (recorderPollTimer) {
-    return;
-  }
+  if (recorderPollTimer) return;
   recorderPollTimer = setInterval(() => {
-    if (!recorderViewEl.classList.contains("hidden")) {
+    if (!recorderView.classList.contains("hidden")) {
       refreshRecorderSteps().catch(() => {});
     }
   }, 1000);
 }
+
+messageInput.addEventListener("input", (event) => {
+  const text = event.target.value;
+  if (textExceedsInputWidth(text)) {
+    expandToTextarea();
+  }
+});
+
+messageTextarea.addEventListener("input", (event) => {
+  const text = event.target.value;
+  updateTextareaHeight();
+  if (text.trim() === "") {
+    setTimeout(() => {
+      if (messageTextarea.value.trim() === "") {
+        collapseToInput();
+      }
+    }, 100);
+  }
+  messageInput.value = text;
+});
+
+messageInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    handleSend();
+  } else if (event.key === "Enter" && event.shiftKey) {
+    event.preventDefault();
+    messageInput.value += "\n";
+    expandToTextarea();
+  }
+});
+
+messageTextarea.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    handleSend();
+  }
+});
+
+messageTextarea.addEventListener("blur", () => {
+  if (messageTextarea.value.trim() === "") {
+    setTimeout(() => {
+      if (messageTextarea.value.trim() === "") {
+        collapseToInput();
+      }
+    }, 100);
+  }
+});
+
+sendButton.addEventListener("click", () => handleSend());
+clearButton.addEventListener("click", () => resetChat());
+openOptionsButton.addEventListener("click", () => chrome.runtime.openOptionsPage());
+openRecorderButton.addEventListener("click", () => showRecorderView(true));
+recorderCloseButton.addEventListener("click", () => showRecorderView(false));
+
+if (micButton && micIcon && messageInput && messageTextarea) {
+  micButton.addEventListener("click", () => {
+    if (isRecording) {
+      setRecordingState(false);
+      playMicSound(false);
+      return;
+    }
+    setRecordingState(true);
+    playMicSound(true);
+  });
+}
+
+if (recordStartEl) {
+  recordStartEl.addEventListener("click", () => handleRecorderStart());
+}
+if (recordStopEl) {
+  recordStopEl.addEventListener("click", () => handleRecorderStop());
+}
+if (recordPlayEl) {
+  recordPlayEl.addEventListener("click", () => handleRecorderPlay());
+}
+if (recordClearEl) {
+  recordClearEl.addEventListener("click", () => handleRecorderClear());
+}
+if (playbackSpeedEl) {
+  playbackSpeedEl.addEventListener("change", () => handlePlaybackSpeedChange());
+}
+if (recorderStepsListEl) {
+  recorderStepsListEl.addEventListener("scroll", () => handleRecorderScroll());
+}
+
+messagesContainer.addEventListener("scroll", () => {
+  chatAutoScroll = isMessagesNearBottom();
+});
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type === "CHAT_STREAM") {
+    handleStreamChunk(message.requestId, message.delta);
+  }
+  if (message?.type === "CHAT_STREAM_DONE") {
+    finalizeStream(message.requestId);
+  }
+  if (message?.type === "RECORDER_PLAYBACK_STEP") {
+    if (tabId && message.tabId && tabId !== message.tabId) {
+      return;
+    }
+    currentPlaybackIndex = message.index;
+    applyPlaybackHighlight();
+  }
+  if (message?.type === "RECORDER_PLAYBACK_DONE") {
+    if (tabId && message.tabId && tabId !== message.tabId) {
+      return;
+    }
+    currentPlaybackIndex = null;
+    applyPlaybackHighlight();
+  }
+});
+
+Promise.all([loadHistory(), chrome.storage.local.get(["recorderPlaybackSpeed"])])
+  .then(([, { recorderPlaybackSpeed }]) => {
+    if (recorderPlaybackSpeed) {
+      playbackSpeedEl.value = String(recorderPlaybackSpeed);
+    }
+    renderHistory();
+  })
+  .catch(() => {});
+
+startRecorderPolling();
+startToolPolling();
+initAiHover();

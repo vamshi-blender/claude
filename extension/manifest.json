@@ -29,12 +29,14 @@
     {
       "matches": ["<all_urls>"],
       "js": ["accessibility-tree.js"],
-      "run_at": "document_start"
+      "run_at": "document_start",
+      "all_frames": false
     },
     {
       "matches": ["<all_urls>"],
       "js": ["recorder-content.js"],
-      "run_at": "document_start"
+      "run_at": "document_start",
+      "all_frames": false
     }
   ],
   "content_security_policy": {
